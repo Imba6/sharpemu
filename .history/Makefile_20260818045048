@@ -1,0 +1,29 @@
+TEST ?=
+
+GUEST_TEST_ROOT := guest-tests/src
+GUEST_TEST_DIR := $(GUEST_TEST_ROOT)/$(TEST)
+
+.PHONY: guest guest-build guest-clean guest-inspect check-test
+
+check-test:
+	@if [ -z "$(TEST)" ]; then \
+		echo "ERROR: TEST is required"; \
+		echo "Example: make guest TEST=hle-kernel-clock"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(GUEST_TEST_DIR)" ]; then \
+		echo "ERROR: guest test not found: $(GUEST_TEST_DIR)"; \
+		exit 1; \
+	fi
+
+guest: check-test
+	$(MAKE) -C $(GUEST_TEST_DIR) clean all inspect
+
+guest-build: check-test
+	$(MAKE) -C $(GUEST_TEST_DIR) all
+
+guest-clean: check-test
+	$(MAKE) -C $(GUEST_TEST_DIR) clean
+
+guest-inspect: check-test
+	$(MAKE) -C $(GUEST_TEST_DIR) inspect
