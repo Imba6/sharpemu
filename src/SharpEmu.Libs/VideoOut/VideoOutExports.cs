@@ -85,7 +85,6 @@ public static class VideoOutExports
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
-    private static int _submitFlipDebugCount;
     private static readonly int _holdFirstFlipMilliseconds =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_HOLD_FIRST_FLIP_MS"), out var holdMs)
             ? Math.Clamp(holdMs, 0, 60_000)
@@ -1238,24 +1237,10 @@ public static class VideoOutExports
     long flipArg,
     bool submitGpuImage)
 {
-    var debugFlip =
-        Interlocked.Increment(ref _submitFlipDebugCount) <= 4;
 
-    void DebugFlip(string text)
-    {
-        if (debugFlip)
-        {
-            Console.Error.WriteLine(
-                $"[VPS5][FLIP] {text} " +
-                $"index={bufferIndex} arg={flipArg}");
-        }
-    }
-
-    DebugFlip("01 ENTER");
 
     GuestGpu.Current.AttachGuestMemory(ctx.Memory);
 
-    DebugFlip("02 memory attached");
 
     if (!TryGetPort(handle, out var port))
     {
@@ -1271,7 +1256,6 @@ public static class VideoOutExports
     FlipEventRegistration[]? flipEvents = null;
     int flipEventCount;
 
-    DebugFlip("03 before state");
 
     lock (_stateGate)
     {
@@ -1301,11 +1285,8 @@ public static class VideoOutExports
         }
     }
 
-    DebugFlip("04 after state");
 
-    DebugFlip("05 before PaceFlip");
     PaceFlip(port.FlipRate);
-    DebugFlip("06 after PaceFlip");
 
     PerfOverlay.RecordSubmit();
 
@@ -1326,7 +1307,6 @@ public static class VideoOutExports
 
         if (submitGpuImage)
         {
-            DebugFlip("07 before TrySubmitGuestImage");
 
             guestImageSubmitted =
                 GuestGpu.Current.TrySubmitGuestImage(
@@ -1335,21 +1315,17 @@ public static class VideoOutExports
                     displayBuffer.Height,
                     displayBuffer.PitchInPixel);
 
-            DebugFlip(
-                $"08 after TrySubmitGuestImage result={guestImageSubmitted}");
         }
     }
 
     if (_dumpVideoOut)
     {
-        DebugFlip("09 before dump");
         _ = TryDumpFrame(
             ctx,
             port,
             bufferIndex,
             flipMode,
             flipArg);
-        DebugFlip("10 after dump");
     }
 
     void TriggerFlipEvents()
@@ -1380,8 +1356,6 @@ public static class VideoOutExports
         }
     }
 
-    DebugFlip(
-        $"11 before events count={flipEventCount}");
 
     if (submitGpuImage)
     {
@@ -1394,14 +1368,12 @@ public static class VideoOutExports
         TriggerFlipEvents();
     }
 
-    DebugFlip("12 after events");
 
     TraceVideoOut(
         $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
         $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
         $"events={flipEventCount} ordered_completion={!submitGpuImage}");
 
-    DebugFlip("13 before TraceFlipSubmit");
 
     LoadProgressDiagnostics.TraceFlipSubmit(
         handle,
@@ -1412,18 +1384,14 @@ public static class VideoOutExports
         guestImageAddress,
         flipEventCount);
 
-    DebugFlip("14 after TraceFlipSubmit");
 
-    DebugFlip("15 before TraceGpuWaitSnapshot");
 
     LoadProgressDiagnostics.TraceGpuWaitSnapshot(
         ctx.Memory);
 
-    DebugFlip("16 after TraceGpuWaitSnapshot");
 
     ReportFrameRate(presented: false);
 
-    DebugFlip("17 after ReportFrameRate");
 
     var diagnosticFlipNumber =
         Interlocked.Increment(
@@ -1440,7 +1408,6 @@ public static class VideoOutExports
             _holdFirstFlipMilliseconds);
     }
 
-    DebugFlip("18 RETURN");
 
     return (int)OrbisGen2Result.ORBIS_GEN2_OK;
 }

@@ -3475,7 +3475,6 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Dictionary<ulong, CpuDisplayFingerprintState>
             _cpuDisplayFingerprintStates = new();
 
-        private long _cpuDisplayFingerprintRefreshCount;
 
         private static bool UseCpuDisplayFingerprintSync =>
             OperatingSystem.IsWindows() ||
@@ -14344,18 +14343,7 @@ internal static unsafe class VulkanVideoPresenter
             state.UploadedFingerprint = fingerprint;
             state.HasUploadedFingerprint = true;
 
-            var traceCount =
-                Interlocked.Increment(
-                    ref _cpuDisplayFingerprintRefreshCount);
 
-            if (traceCount <= 64)
-            {
-                Console.Error.WriteLine(
-                    $"[SYNC] cpu-display-refresh " +
-                    $"addr=0x{image.Address:X16} " +
-                    $"{image.LogicalWidth}x{image.LogicalHeight} " +
-                    $"fingerprint=0x{fingerprint:X16}");
-            }
 
             return true;
         }

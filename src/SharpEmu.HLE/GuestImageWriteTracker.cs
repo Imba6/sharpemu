@@ -19,17 +19,6 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static unsafe class GuestImageWriteTracker
 {
-
-private static long _diagFaultEnter;
-private static long _diagFaultMatched;
-private static long _diagBeforeUnprotect;
-private static long _diagAfterUnprotect;
-private static long _diagMarkedDirty;
-private static long _diagReturnTrue;
-private static long _diagEpoch;
-private static long _diagPrintedEpoch;
-
-
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
     private const int ClockMonotonicRaw = 4;
@@ -235,20 +224,6 @@ private static long _diagPrintedEpoch;
             NativeMemory.Free(
                 (void*)scratch);
         }
-
-        /*
-         * WarmUp intentionally exercises TryHandleWriteFault directly.
-         * Do not let those synthetic calls pollute the real-fault
-         * diagnostics.
-         */
-        Interlocked.Exchange(ref _diagFaultEnter, 0);
-        Interlocked.Exchange(ref _diagFaultMatched, 0);
-        Interlocked.Exchange(ref _diagBeforeUnprotect, 0);
-        Interlocked.Exchange(ref _diagAfterUnprotect, 0);
-        Interlocked.Exchange(ref _diagMarkedDirty, 0);
-        Interlocked.Exchange(ref _diagReturnTrue, 0);
-        Interlocked.Exchange(ref _diagEpoch, 0);
-        Interlocked.Exchange(ref _diagPrintedEpoch, 0);
     }
 }
     /// <summary>
@@ -609,10 +584,6 @@ public static void Track(
     {
         return false;
     }
-
-    Interlocked.Increment(ref _diagFaultEnter);
-    Interlocked.Increment(ref _diagEpoch);
-
     var ranges = Volatile.Read(ref _rangeSnapshot).Ranges;
 
     var writableStart = ulong.MaxValue;
@@ -639,10 +610,6 @@ public static void Track(
     {
         return false;
     }
-
-    Interlocked.Increment(ref _diagFaultMatched);
-    Interlocked.Increment(ref _diagEpoch);
-
     /*
      * Expand through all transitively overlapping tracked ranges.
      */
@@ -695,9 +662,6 @@ public static void Track(
 
     if (needsUnprotect)
     {
-        Interlocked.Increment(ref _diagBeforeUnprotect);
-        Interlocked.Increment(ref _diagEpoch);
-
         if (!TrySetProtection(
                 writableStart,
                 writableEnd - writableStart,
@@ -705,9 +669,6 @@ public static void Track(
         {
             return false;
         }
-
-        Interlocked.Increment(ref _diagAfterUnprotect);
-        Interlocked.Increment(ref _diagEpoch);
     }
 
     for (var index = 0; index < ranges.Length; index++)
@@ -766,45 +727,9 @@ public static void Track(
                 2);
         }
     }
-
-    Interlocked.Increment(ref _diagMarkedDirty);
-    Interlocked.Increment(ref _diagEpoch);
-
-    Interlocked.Increment(ref _diagReturnTrue);
-    Interlocked.Increment(ref _diagEpoch);
-
     return true;
 }
 
-public static void FlushFaultDiagnostics()
-{
-    if (!_enabled)
-    {
-        return;
-    }
-
-    var epoch =
-        Volatile.Read(ref _diagEpoch);
-
-    if (epoch ==
-        Volatile.Read(ref _diagPrintedEpoch))
-    {
-        return;
-    }
-
-    Volatile.Write(
-        ref _diagPrintedEpoch,
-        epoch);
-
-    Console.Error.WriteLine(
-        "[WT][FAULT] " +
-        $"enter={Volatile.Read(ref _diagFaultEnter)} " +
-        $"matched={Volatile.Read(ref _diagFaultMatched)} " +
-        $"before_unprotect={Volatile.Read(ref _diagBeforeUnprotect)} " +
-        $"after_unprotect={Volatile.Read(ref _diagAfterUnprotect)} " +
-        $"dirty={Volatile.Read(ref _diagMarkedDirty)} " +
-        $"return_true={Volatile.Read(ref _diagReturnTrue)}");
-}
 
 
     private static void ArmLocked(TrackedRange range, string operation)
