@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import re
 import shutil
@@ -11,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+NID_SUFFIX = bytes.fromhex("518d64a635ded8c1e6b039b1c3e55230")
 
 IMPORT_RE = re.compile(
     r"\[LOADER\] Import name resolved to NID: (?P<name>.+?) -> (?P<nid>\S+)"
@@ -42,6 +45,12 @@ READ_ELF_SYMBOL_RE = re.compile(
     r"(?P<type>\w+)\s+\w+\s+\w+\s+UND\s+(?P<name>\S+)\s*$"
 )
 NEEDED_RE = re.compile(r"Shared library: \[(?P<library>[^\]]+)\]")
+
+
+def compute_nid(export_name: str) -> str:
+    digest = hashlib.sha1(export_name.encode("utf-8") + NID_SUFFIX).digest()
+    encoded = base64.b64encode(digest[:8][::-1]).decode("ascii")
+    return encoded.rstrip("=").replace("/", "-")
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,7 +279,7 @@ def build_report(elf: Path, log_path: Path | None) -> dict[str, object]:
 
         entry: dict[str, object] = {
             "name": name,
-            "nid": runtime_imports.get(name),
+            "nid": runtime_imports.get(name) or compute_nid(name),
             "library": library,
             "kind": "data" if symbol_type == "OBJECT" else "function",
             "symbol_type": symbol_type,
@@ -297,7 +306,7 @@ def build_report(elf: Path, log_path: Path | None) -> dict[str, object]:
         status = "implemented" if provider else "blocking"
         entry: dict[str, object] = {
             "name": name,
-            "nid": runtime_imports.get(name),
+            "nid": runtime_imports.get(name) or compute_nid(name),
             "library": (
                 implementation.get("library", "unknown")
                 if implementation
@@ -386,6 +395,7 @@ def print_report(report: dict[str, object], print_all: bool) -> None:
             assert isinstance(item, dict)
             print(
                 f"  [P{item['priority']}] {item['library']}:{item['name']} "
+                f"nid={item.get('nid')} "
                 f"({item['kind']}, requests={item.get('requests', 0)})"
             )
 
