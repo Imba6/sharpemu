@@ -310,7 +310,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	// sceKernelDlsym can resolve itself for payload-style bootstraps.
 	private ulong _guestDlsymStubAddress;
 
-	private bool _guestDlsymStubIsDedicated;
+	private bool _guestDlsymStubIsBootstrap;
 
 	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
 
@@ -1258,7 +1258,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine($"[LOADER][INFO] Setting up {importStubs.Count} import stubs...");
 		ClearImportHandlerTrampolines();
 		_guestDlsymStubAddress = 0;
-		_guestDlsymStubIsDedicated = false;
+		_guestDlsymStubIsBootstrap = false;
 		_importEntries = new ImportStubEntry[importStubs.Count];
 		HashSet<ulong> hashSet = new HashSet<ulong>(importStubs.Keys);
 		int num = 0;
@@ -1344,25 +1344,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private void RecordGuestDlsymStubCandidate(ulong stubAddress, string nid)
 	{
-		if (string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
-			string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal))
+		if (string.Equals(nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 		{
-			if (!_guestDlsymStubIsDedicated || stubAddress < _guestDlsymStubAddress)
+			// The injected callback is the dlsym entry that the payload already
+			// holds. Returning that same callable address for a self-lookup is
+			// observable by payload CRTs, which use the equality to decide whether
+			// they must resolve a separate raw syscall entry.
+			//
+			// The bridge is registered twice (slot base and its jmp at +0x0A);
+			// only the slot base is safely callable as a function entry.
+			if (!_guestDlsymStubIsBootstrap || stubAddress < _guestDlsymStubAddress)
 			{
 				_guestDlsymStubAddress = stubAddress;
-				_guestDlsymStubIsDedicated = true;
+				_guestDlsymStubIsBootstrap = true;
 			}
 			return;
 		}
 
-		if (_guestDlsymStubIsDedicated ||
-			!string.Equals(nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		if (_guestDlsymStubIsBootstrap ||
+			(!string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) &&
+			 !string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal)))
 		{
 			return;
 		}
 
-		// The bridge is registered twice (slot base and its jmp at +0x0A);
-		// only the slot base is safely callable as a function entry.
 		if (_guestDlsymStubAddress == 0 || stubAddress < _guestDlsymStubAddress)
 		{
 			_guestDlsymStubAddress = stubAddress;

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "target": {
     "name": "LinkDev.elf",
-    "path": "/mnt/e/claude_src/virtualps5/real-tests/LinkDev/LinkDev.elf",
+    "path": "/home/illia/projects/virtualps5/real-tests/LinkDev/LinkDev.elf",
     "generation": "Gen4",
     "needed_libraries": [
       "libSceSystemService.sprx",
@@ -20,11 +20,11 @@
     ]
   },
   "runtime": {
-    "log": "/mnt/e/claude_src/virtualps5/real-tests/LinkDev/run.log",
+    "log": "/home/illia/projects/virtualps5/real-tests/LinkDev/run.log",
     "static_nids_resolved": 205,
     "imported_data_rebound": 0,
     "imported_data_unresolved": 5,
-    "stall_import_stub": "__internal_bootstrap_bridge"
+    "stall_import_stub": "__internal_kernel_dynlib_dlsym"
   },
   "summary": {
     "imports_total": 205,
@@ -33,28 +33,20 @@
     "missing": 88,
     "unresolved_data": 5,
     "unknown_data": 0,
-    "blocking": 1
+    "blocking": 0
   },
-  "blockers": [
-    {
-      "name": "sceKernelDlsym",
-      "nid": "LwG8g3niqwA",
-      "library": "libKernel",
-      "kind": "dynamic-symbol",
-      "status": "blocking",
-      "priority": 0,
-      "requests": 4
-    }
-  ],
+  "blockers": [],
   "dynamic_requests": [
     {
-      "name": "sceKernelDlsym",
-      "nid": "LwG8g3niqwA",
+      "name": "getpid",
+      "nid": "HoLVWNanBBc",
       "library": "libKernel",
       "kind": "dynamic-symbol",
-      "status": "blocking",
-      "priority": 0,
-      "requests": 4
+      "status": "implemented",
+      "priority": 100,
+      "requests": 4,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelRuntimeCompatExports.cs"
     }
   ],
   "imports": [

@@ -29,7 +29,7 @@ int main(void)
 {
     void *dlsym_addr = 0;
     void *probe_addr = 0;
-    void *missing_addr = 0;
+    void *missing_addr = (void *)(uintptr_t)0x123456789ABCDEF0ULL;
 
     /*
      * Mirror the LinkDev bootstrap shape: sceKernelDlsym must be able to
@@ -74,7 +74,7 @@ int main(void)
         __builtin_trap();
     }
 
-    if (missing_addr != 0) {
+    if (missing_addr != (void *)(uintptr_t)0x123456789ABCDEF0ULL) {
         __builtin_trap();
     }
 
