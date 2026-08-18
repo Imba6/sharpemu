@@ -6,11 +6,12 @@ application imports and runtime blockers.
 
 ## Branch safety
 
-- Work only on branch `fable`.
-- Never push directly to `virtual-os`, `main`, or `upstream`.
+- Work only on the branch explicitly assigned for the current task.
+- Approved agent/work branches include `fable`, `codex`, `gpt`, and task-specific branches such as `gpt-dlsym`.
+- Never switch to or push directly to `virtual-os`, `main`, or `upstream`.
+- If the current branch is not clearly an agent/work branch, stop and ask before modifying files.
 - Never rewrite history or force-push unless the human explicitly requests it.
 - Keep each commit limited to one NID or one tightly related API group.
-- Do not modify unrelated SharpEmu code while implementing an HLE function.
 
 ## Architecture boundaries
 
