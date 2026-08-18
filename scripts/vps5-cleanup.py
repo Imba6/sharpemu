@@ -186,19 +186,23 @@ def cleanup_vulkan_presenter(text: str) -> str:
     return text
 
 
-def rewrite(path: Path, transform) -> None:
-    original = path.read_text(encoding="utf-8-sig")
-    cleaned = transform(original)
-    if cleaned == original:
-        raise RuntimeError(f"no changes made to {path}")
-    path.write_text(cleaned, encoding="utf-8", newline="\n")
-    print(f"cleaned: {path.relative_to(ROOT)}")
+def read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
 
 
 def main() -> None:
-    rewrite(VIDEO_OUT, cleanup_video_out)
-    rewrite(WRITE_TRACKER, cleanup_write_tracker)
-    rewrite(VULKAN_PRESENTER, cleanup_vulkan_presenter)
+    # Validate every transform first. Nothing is written unless all three files
+    # match the expected diagnostic shapes and all functional regression guards
+    # survive the cleanup.
+    cleaned = {
+        VIDEO_OUT: cleanup_video_out(read_source(VIDEO_OUT)),
+        WRITE_TRACKER: cleanup_write_tracker(read_source(WRITE_TRACKER)),
+        VULKAN_PRESENTER: cleanup_vulkan_presenter(read_source(VULKAN_PRESENTER)),
+    }
+
+    for path, content in cleaned.items():
+        path.write_text(content, encoding="utf-8", newline="\n")
+        print(f"cleaned: {path.relative_to(ROOT)}")
 
     print("cleanup complete")
     print("temporary logs removed: [VPS5][FLIP], [WT][FAULT], cpu-display-refresh")
