@@ -7,6 +7,11 @@
 #define VIDEOOUT_PIXEL_FORMAT_A8R8G8B8_SRGB 0x80000000u
 #define VIDEOOUT_TILING_MODE_LINEAR          1u
 
+/*
+ * We intentionally keep PS ABI structures raw here.
+ * The regression test checks exact byte layouts.
+ */
+
 typedef struct {
     uint8_t bytes[0x28];
 } videoout_buffer_attribute_t;
@@ -19,11 +24,17 @@ typedef struct {
     uint8_t bytes[0x40];
 } videoout_flip_status_t;
 
+
 /*
- * Exactly four isolated 4 KiB pages.
+ * Guest framebuffer.
+ *
+ * Static storage keeps it out of our small stack and gives VideoOut
+ * a stable guest virtual address.
  */
-static uint32_t framebuffer[WIDTH * HEIGHT]
-    __attribute__((aligned(4096)));
+static uint32_t framebuffer[WIDTH * HEIGHT];
+
+static volatile uint64_t g_sink;
+
 
 int sceVideoOutOpen(
     int user_id,
@@ -95,19 +106,26 @@ static uint64_t read_u64(
     uint64_t value = 0;
 
     for (int i = 0; i < 8; i++) {
-        value |= ((uint64_t)p[i]) << (i * 8);
+        value |=
+            ((uint64_t)p[i]) << (i * 8);
     }
 
     return value;
 }
 
 
+/*
+ * Use volatile stores deliberately.
+ *
+ * Apart from making the framebuffer change visible to the guest-memory
+ * write tracker, this prevents clang from replacing the loop with memset
+ * in our freestanding guest.
+ */
 static void fill_framebuffer(
     uint32_t color
 )
 {
-    volatile uint32_t *pixels =
-        (volatile uint32_t *)framebuffer;
+    volatile uint32_t *pixels = framebuffer;
 
     for (size_t i = 0; i < WIDTH * HEIGHT; i++) {
         pixels[i] = color;
@@ -117,11 +135,14 @@ static void fill_framebuffer(
 
 int main(void)
 {
+    /*
+     * SharpEmu currently accepts user id 0/255 for main VideoOut.
+     */
     int handle = sceVideoOutOpen(
-        0,
-        0,
-        0,
-        0
+        0,      /* user id */
+        0,      /* main bus */
+        0,      /* index */
+        0       /* param */
     );
 
     if (handle <= 0) {
@@ -129,6 +150,9 @@ int main(void)
     }
 
 
+    /*
+     * Ask VideoOut to build the PS buffer-attribute structure.
+     */
     videoout_buffer_attribute_t attribute;
 
     if (sceVideoOutSetBufferAttribute(
@@ -143,7 +167,14 @@ int main(void)
     }
 
 
+    /*
+     * Register one guest framebuffer.
+     *
+     * Avoid initialized local arrays so clang does not decide
+     * that our freestanding binary suddenly needs memcpy.
+     */
     void *addresses[1];
+
     addresses[0] = framebuffer;
 
     int group = sceVideoOutRegisterBuffers(
@@ -159,6 +190,9 @@ int main(void)
     }
 
 
+    /*
+     * Registration should update the output dimensions/state.
+     */
     videoout_output_status_t output_status;
 
     if (sceVideoOutGetOutputStatus(
@@ -176,21 +210,30 @@ int main(void)
     uint64_t refresh_rate =
         read_u64(&output_status.bytes[0x08]);
 
-    if (resolution_class == 0 ||
-        connected != 1 ||
-        refresh_rate == 0) {
+    if (resolution_class == 0) {
+        __builtin_trap();
+    }
+
+    if (connected != 1) {
+        __builtin_trap();
+    }
+
+    if (refresh_rate == 0) {
         __builtin_trap();
     }
 
 
     /*
-     * Frame #1: RED.
+     * FIRST FRAME
      *
-     * Written before tracking is armed.
+     * Fill the framebuffer before its first flip. The first presentation
+     * should materialize a GuestImageResource and upload this initial
+     * CPU-written image.
+     *
+     * A8R8G8B8:
+     *   0xFFFF0000 = opaque red
      */
-    fill_framebuffer(
-        0xFFFF0000u
-    );
+    fill_framebuffer(0xFFFF0000u);
 
     if (sceVideoOutSubmitFlip(
             handle,
@@ -202,24 +245,39 @@ int main(void)
 
 
     /*
-     * Allow Vulkan to bootstrap the image and arm tracking.
+     * Give the host presenter enough time to:
+     *
+     *   - consume the first flip
+     *   - bootstrap GuestImageResource
+     *   - perform the initial upload
+     *   - arm GuestImageWriteTracker
+     *
+     * Keeping this deliberately long also makes the red frame visible
+     * when running this test interactively.
      */
-    if (sceKernelUsleep(
-            1000000) != 0) {
+    if (sceKernelUsleep(1000000) != 0) {
         __builtin_trap();
     }
 
 
     /*
-     * Frame #2: GREEN.
+     * DIRTY UPDATE
      *
-     * This is the native CPU write that previously stalled.
+     * Rewrite the SAME guest framebuffer after CPU write tracking has
+     * been armed. This must mark the image dirty.
+     *
+     * 0xFF00FF00 = opaque green
      */
-    fill_framebuffer(
-        0xFF00FF00u
-    );
+    fill_framebuffer(0xFF00FF00u);
 
 
+    /*
+     * Submit the same buffer again.
+     *
+     * The Vulkan path should now consume the dirty write and execute
+     * a CPU -> GuestImage refresh instead of continuing to present the
+     * stale red image.
+     */
     if (sceVideoOutSubmitFlip(
             handle,
             0,
@@ -230,14 +288,17 @@ int main(void)
 
 
     /*
-     * Keep green visible.
+     * Leave the second frame up long enough for the host to drain the
+     * dirty image and make the green result visible.
      */
-    if (sceKernelUsleep(
-            1000000) != 0) {
+    if (sceKernelUsleep(1000000) != 0) {
         __builtin_trap();
     }
 
 
+    /*
+     * Verify that VideoOut actually recorded both flips.
+     */
     videoout_flip_status_t flip_status;
 
     if (sceVideoOutGetFlipStatus(
@@ -261,8 +322,17 @@ int main(void)
     }
 
 
-    if (sceVideoOutClose(
-            handle) != 0) {
+    g_sink =
+        (uint64_t)handle ^
+        (uint64_t)group ^
+        resolution_class ^
+        connected ^
+        refresh_rate ^
+        flip_count ^
+        current_buffer;
+
+
+    if (sceVideoOutClose(handle) != 0) {
         __builtin_trap();
     }
 

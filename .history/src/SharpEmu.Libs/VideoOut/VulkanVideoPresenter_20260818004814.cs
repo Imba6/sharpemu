@@ -23,7 +23,6 @@ using System.Security.Cryptography;
 using System.Text;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
-using static SharpEmu.Libs.VideoOut.VideoOutExports;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -3449,38 +3448,6 @@ internal static unsafe class VulkanVideoPresenter
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<ulong, GuestImageResource> _guestImages = new();
-
-        /*
-         * CPU-rendered VideoOut dirty sync fallback.
-         *
-         * Win32 native execution currently cannot reliably resume guest stores
-         * into PAGE_READONLY framebuffer pages through the VEH trampoline, so
-         * CPU display buffers stay writable on Windows.
-         *
-         * Each presented CPU display buffer is read into one persistent byte[]
-         * and fingerprinted. Static frames do not upload; changed frames reuse
-         * that same byte[] for the Vulkan upload, so there is no second guest
-         * memory copy and no per-frame allocation.
-         *
-         * POSIX hosts keep GuestImageWriteTracker when enabled. Tracker-disabled
-         * hosts use this same fallback.
-         */
-        private sealed class CpuDisplayFingerprintState
-        {
-            public byte[] Scratch = [];
-            public ulong UploadedFingerprint;
-            public bool HasUploadedFingerprint;
-        }
-
-        private readonly Dictionary<ulong, CpuDisplayFingerprintState>
-            _cpuDisplayFingerprintStates = new();
-
-        private long _cpuDisplayFingerprintRefreshCount;
-
-        private static bool UseCpuDisplayFingerprintSync =>
-            OperatingSystem.IsWindows() ||
-            !SharpEmu.HLE.GuestImageWriteTracker.Enabled;
-
         private readonly record struct GuestImageVariantKey(
             ulong Address,
             uint Width,
@@ -8975,6 +8942,7 @@ internal static unsafe class VulkanVideoPresenter
 
             return resource;
         }
+
         /// <summary>
         /// Single dirty consumer per drain: re-upload CPU-written guest images
         /// from guest memory, evict matching texture-cache entries, then
@@ -8982,9 +8950,7 @@ internal static unsafe class VulkanVideoPresenter
         /// </summary>
         private void DrainGuestImageCpuSync()
         {
-            var syncEnabled =
-                SharpEmu.HLE.GuestImageWriteTracker.Enabled;
-
+            var syncEnabled = SharpEmu.HLE.GuestImageWriteTracker.Enabled;
             HashSet<ulong>? dirtyAddresses = null;
             List<(ulong Address, uint Width, uint Height, ulong ByteCount)>? extents = null;
             if (syncEnabled)
@@ -13792,8 +13758,7 @@ internal static unsafe class VulkanVideoPresenter
             Format format,
             bool requiresStorage = false,
             uint type = Gen5TextureType2D,
-            uint depth = 1,
-            bool trackGuestCpuWrites = true)
+            uint depth = 1)
         {
             depth = GetGuestTextureDepth(type, depth);
             var supportsStorageUsage = SupportsStorageImage(format);
@@ -14013,8 +13978,7 @@ internal static unsafe class VulkanVideoPresenter
                 // 1920x1080 cap left every 4K surface permanently
                 // un-invalidated, so a guest CPU rewrite of one was never
                 // reflected and the sample served stale bytes.
-                if (trackGuestCpuWrites &&
-                    ShouldTrackGuestImageWrites(retainedByteCount))
+                if (ShouldTrackGuestImageWrites(retainedByteCount))
                 {
                     SharpEmu.HLE.GuestImageWriteTracker.Track(
                         target.Address,
@@ -14177,8 +14141,7 @@ internal static unsafe class VulkanVideoPresenter
             // extent under a byte budget instead of a resolution cap so
             // oversized render targets the guest later rewrites with the CPU
             // are re-uploaded on the next sample.
-            if (trackGuestCpuWrites &&
-                ShouldTrackGuestImageWrites(createdByteCount))
+            if (ShouldTrackGuestImageWrites(createdByteCount))
             {
                 SharpEmu.HLE.GuestImageWriteTracker.Track(
                     target.Address,
@@ -14221,304 +14184,6 @@ internal static unsafe class VulkanVideoPresenter
                 CurrentGuestWorkSequenceForDiagnostics,
                 "vulkan.render-target");
         }
-
-
-        private static ulong ComputeCpuDisplayFingerprint(
-            ReadOnlySpan<byte> bytes)
-        {
-            const ulong offsetBasis = 14695981039346656037UL;
-            const ulong prime = 1099511628211UL;
-
-            var hash = offsetBasis;
-            var wordByteCount = bytes.Length & ~7;
-            var words = MemoryMarshal.Cast<byte, ulong>(
-                bytes[..wordByteCount]);
-
-            foreach (var word in words)
-            {
-                hash = unchecked((hash ^ word) * prime);
-            }
-
-            for (var index = wordByteCount; index < bytes.Length; index++)
-            {
-                hash = unchecked((hash ^ bytes[index]) * prime);
-            }
-
-            return hash ^ (ulong)bytes.Length;
-        }
-
-        private void RememberCpuDisplayUpload(
-            ulong address,
-            byte[] uploadedPixels)
-        {
-            if (!UseCpuDisplayFingerprintSync ||
-                address == 0 ||
-                uploadedPixels.Length == 0)
-            {
-                return;
-            }
-
-            _cpuDisplayFingerprintStates[address] =
-                new CpuDisplayFingerprintState
-                {
-                    Scratch = GC.AllocateUninitializedArray<byte>(
-                        uploadedPixels.Length),
-                    UploadedFingerprint =
-                        ComputeCpuDisplayFingerprint(uploadedPixels),
-                    HasUploadedFingerprint = true,
-                };
-        }
-
-        private bool RefreshCpuDisplayBufferIfChanged(
-            GuestImageResource image)
-        {
-            if (!UseCpuDisplayFingerprintSync ||
-                !image.IsCpuBacked ||
-                image.Address == 0)
-            {
-                return false;
-            }
-
-            var guestMemory = _guestMemory;
-            if (guestMemory is null)
-            {
-                return false;
-            }
-
-            ulong byteCount;
-            lock (_gate)
-            {
-                if (!_guestImageExtents.TryGetValue(
-                        image.Address,
-                        out var extent))
-                {
-                    return false;
-                }
-
-                byteCount = extent.ByteCount;
-            }
-
-            if (byteCount == 0 ||
-                byteCount > MaxTrackedGuestImageBytes ||
-                byteCount > int.MaxValue)
-            {
-                return false;
-            }
-
-            var requiredLength = checked((int)byteCount);
-            if (!_cpuDisplayFingerprintStates.TryGetValue(
-                    image.Address,
-                    out var state) ||
-                state.Scratch.Length != requiredLength)
-            {
-                state = new CpuDisplayFingerprintState
-                {
-                    Scratch =
-                        GC.AllocateUninitializedArray<byte>(
-                            requiredLength),
-                };
-                _cpuDisplayFingerprintStates[image.Address] = state;
-            }
-
-            if (!guestMemory.TryRead(
-                    image.Address,
-                    state.Scratch))
-            {
-                return false;
-            }
-
-            var fingerprint =
-                ComputeCpuDisplayFingerprint(
-                    state.Scratch);
-
-            if (state.HasUploadedFingerprint &&
-                state.UploadedFingerprint == fingerprint)
-            {
-                return false;
-            }
-
-            UploadGuestImageInitialData(
-                image,
-                state.Scratch);
-
-            state.UploadedFingerprint = fingerprint;
-            state.HasUploadedFingerprint = true;
-
-            var traceCount =
-                Interlocked.Increment(
-                    ref _cpuDisplayFingerprintRefreshCount);
-
-            if (traceCount <= 64)
-            {
-                Console.Error.WriteLine(
-                    $"[SYNC] cpu-display-refresh " +
-                    $"addr=0x{image.Address:X16} " +
-                    $"{image.LogicalWidth}x{image.LogicalHeight} " +
-                    $"fingerprint=0x{fingerprint:X16}");
-            }
-
-            return true;
-        }
-
-
-        private bool TryBootstrapCpuDisplayBuffer(
-    ulong address,
-    out GuestImageResource? image)
-{
-    image = null;
-
-    if (address == 0)
-    {
-        return false;
-    }
-
-    if (!VideoOutExports.TryGetDisplayBufferInfo(
-            address,
-            out var displayBuffer))
-    {
-        return false;
-    }
-
-    /*
-     * First milestone deliberately supports only the simple
-     * CPU-rendered VideoOut layout we have proven with HomebrewTest:
-     *
-     *   - linear
-     *   - tightly packed
-     *   - 32-bit RGBA/BGRA sRGB
-     *
-     * Tiled / padded display buffers stay on the existing path.
-     */
-    if (displayBuffer.TilingMode != 1 ||
-        displayBuffer.Width == 0 ||
-        displayBuffer.Height == 0 ||
-        displayBuffer.PitchInPixel != displayBuffer.Width)
-    {
-        return false;
-    }
-
-    var pixelLayout =
-        VideoOutExports.GetCpuDisplayPixelLayout(
-            displayBuffer.PixelFormat);
-
-    var imageFormat =
-        pixelLayout switch
-        {
-            CpuDisplayPixelLayout.Rgba8Srgb
-                => Format.R8G8B8A8Srgb,
-
-            CpuDisplayPixelLayout.Bgra8Srgb
-                => Format.B8G8R8A8Srgb,
-
-            _ => Format.Undefined,
-        };
-
-    if (imageFormat == Format.Undefined)
-    {
-        return false;
-    }
-
-    var guestMemory = _guestMemory;
-
-    if (guestMemory is null)
-    {
-        return false;
-    }
-
-    var byteCount =
-        checked(
-            (ulong)displayBuffer.Width *
-            displayBuffer.Height *
-            4UL);
-
-    if (byteCount > int.MaxValue)
-    {
-        return false;
-    }
-
-    var pixels =
-        GC.AllocateUninitializedArray<byte>(
-            checked((int)byteCount));
-
-    if (!guestMemory.TryRead(
-            address,
-            pixels))
-    {
-        return false;
-    }
-
-    /*
-     * AGC data-format 10 + number-type 9 represents
-     * 8-bit RGBA sRGB in the guest image registry.
-     *
-     * The Vulkan backing format carries the actual
-     * R/B component order of the VideoOut buffer.
-     */
-    var target =
-        new GuestRenderTarget(
-            address,
-            displayBuffer.Width,
-            displayBuffer.Height,
-            Format: 10,
-            NumberType: 9);
-
-    image =
-        GetOrCreateGuestImage(
-            target,
-            imageFormat,
-            trackGuestCpuWrites:
-                !UseCpuDisplayFingerprintSync);
-
-    if (!image.Initialized)
-    {
-        UploadGuestImageInitialData(
-            image,
-            pixels);
-    }
-
-    image.IsCpuBacked = true;
-
-    lock (_gate)
-    {
-        _guestImageExtents[address] =
-            (
-                displayBuffer.Width,
-                displayBuffer.Height,
-                byteCount
-            );
-    }
-
-    if (UseCpuDisplayFingerprintSync)
-    {
-        RememberCpuDisplayUpload(
-            address,
-            pixels);
-    }
-    else
-    {
-        TrackCpuBackedGuestImage(image);
-    }
-
-    /*
-     * Do not seed _cpuBackedUploadGenerations here.
-     *
-     * That table means the GPU image is known to contain CPU content for a
-     * specific GuestImageWriteTracker generation. Fingerprint-backed display
-     * buffers deliberately do not participate in that generation contract.
-     */
-
-    Console.Error.WriteLine(
-        $"[LOADER][INFO] Vulkan CPU display buffer materialized: " +
-        $"addr=0x{address:X16} " +
-        $"{displayBuffer.Width}x{displayBuffer.Height} " +
-        $"pitch={displayBuffer.PitchInPixel} " +
-        $"pixel=0x{displayBuffer.PixelFormat:X16} " +
-        $"vk={imageFormat}");
-
-    return true;
-}
-
-
 
         private (RenderPass RenderPass, RenderPass InitialRenderPass, Framebuffer Framebuffer)
             CreateRenderPassAndFramebuffer(
@@ -16105,20 +15770,6 @@ internal static unsafe class VulkanVideoPresenter
                 _guestImages.TryGetValue(
                     presentation.GuestImageAddress,
                     out presentedGuestImage);
-
-                if (presentedGuestImage is null)
-                {
-                    _ = TryBootstrapCpuDisplayBuffer(
-                        presentation.GuestImageAddress,
-                        out presentedGuestImage);
-                }
-            }
-
-            if (presentation.GuestImageVersion == 0 &&
-                presentedGuestImage is not null)
-            {
-                _ = RefreshCpuDisplayBufferIfChanged(
-                    presentedGuestImage);
             }
 
             if (presentation.GuestImageAddress != 0 &&

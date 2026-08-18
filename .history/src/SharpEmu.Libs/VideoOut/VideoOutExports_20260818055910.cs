@@ -85,7 +85,6 @@ public static class VideoOutExports
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
-    private static int _submitFlipDebugCount;
     private static readonly int _holdFirstFlipMilliseconds =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_HOLD_FIRST_FLIP_MS"), out var holdMs)
             ? Math.Clamp(holdMs, 0, 60_000)
@@ -1231,219 +1230,137 @@ public static class VideoOutExports
     }
 
     private static int SubmitFlip(
-    CpuContext ctx,
-    int handle,
-    int bufferIndex,
-    int flipMode,
-    long flipArg,
-    bool submitGpuImage)
-{
-    var debugFlip =
-        Interlocked.Increment(ref _submitFlipDebugCount) <= 4;
-
-    void DebugFlip(string text)
+        CpuContext ctx,
+        int handle,
+        int bufferIndex,
+        int flipMode,
+        long flipArg,
+        bool submitGpuImage)
     {
-        if (debugFlip)
+        GuestGpu.Current.AttachGuestMemory(ctx.Memory);
+        if (!TryGetPort(handle, out var port))
         {
-            Console.Error.WriteLine(
-                $"[VPS5][FLIP] {text} " +
-                $"index={bufferIndex} arg={flipArg}");
+            return OrbisVideoOutErrorInvalidHandle;
         }
-    }
 
-    DebugFlip("01 ENTER");
-
-    GuestGpu.Current.AttachGuestMemory(ctx.Memory);
-
-    DebugFlip("02 memory attached");
-
-    if (!TryGetPort(handle, out var port))
-    {
-        return OrbisVideoOutErrorInvalidHandle;
-    }
-
-    if (bufferIndex < -1 || bufferIndex >= MaxDisplayBuffers)
-    {
-        return OrbisVideoOutErrorInvalidIndex;
-    }
-
-    ulong eventHint;
-    FlipEventRegistration[]? flipEvents = null;
-    int flipEventCount;
-
-    DebugFlip("03 before state");
-
-    lock (_stateGate)
-    {
-        if (bufferIndex != -1 &&
-            port.BufferSlots[bufferIndex].GroupIndex < 0)
+        if (bufferIndex < -1 || bufferIndex >= MaxDisplayBuffers)
         {
             return OrbisVideoOutErrorInvalidIndex;
         }
 
-        port.CurrentBuffer = bufferIndex;
-        port.FlipCount++;
-
-        eventHint =
-            SceVideoOutInternalEventFlip |
-            ((unchecked((ulong)flipArg) &
-              0x0000_FFFF_FFFF_FFFFUL) << 16);
-
-        flipEventCount = port.FlipEvents.Count;
-
-        if (flipEventCount != 0)
+        // Pooled snapshot for the same reason as SignalVblank: triggers run outside
+        // _stateGate, and SubmitFlip is per-frame so a fresh List copy is steady churn.
+        ulong eventHint;
+        FlipEventRegistration[]? flipEvents = null;
+        int flipEventCount;
+        lock (_stateGate)
         {
-            flipEvents =
-                ArrayPool<FlipEventRegistration>.Shared.Rent(
-                    flipEventCount);
+            if (bufferIndex != -1 && port.BufferSlots[bufferIndex].GroupIndex < 0)
+            {
+                return OrbisVideoOutErrorInvalidIndex;
+            }
 
-            port.FlipEvents.CopyTo(flipEvents);
+            port.CurrentBuffer = bufferIndex;
+            port.FlipCount++;
+            eventHint = SceVideoOutInternalEventFlip |
+                ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
+            flipEventCount = port.FlipEvents.Count;
+            if (flipEventCount != 0)
+            {
+                flipEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(flipEventCount);
+                port.FlipEvents.CopyTo(flipEvents);
+            }
         }
-    }
 
-    DebugFlip("04 after state");
+        PaceFlip(port.FlipRate);
+        PerfOverlay.RecordSubmit();
 
-    DebugFlip("05 before PaceFlip");
-    PaceFlip(port.FlipRate);
-    DebugFlip("06 after PaceFlip");
+        var guestImageSubmitted = false;
+        ulong guestImageAddress = 0;
+        if (bufferIndex >= 0 &&
+            TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
+        {
+            Interlocked.Exchange(
+                ref _hdrOutputRequested,
+                IsHdrPixelFormat(displayBuffer.PixelFormat) ? 1 : 0);
+            guestImageAddress = displayBuffer.Address;
+            if (submitGpuImage)
+            {
+                guestImageSubmitted =
+                    GuestGpu.Current.TrySubmitGuestImage(
+                        displayBuffer.Address,
+                        displayBuffer.Width,
+                        displayBuffer.Height,
+                        displayBuffer.PitchInPixel);
+            }
+        }
 
-    PerfOverlay.RecordSubmit();
+        if (_dumpVideoOut)
+        {
+            _ = TryDumpFrame(ctx, port, bufferIndex, flipMode, flipArg);
+        }
 
-    var guestImageSubmitted = false;
-    ulong guestImageAddress = 0;
+        void TriggerFlipEvents()
+        {
+            if (flipEvents is null)
+            {
+                return;
+            }
 
-    if (bufferIndex >= 0 &&
-        TryGetDisplayBufferInfo(
-            handle,
-            bufferIndex,
-            out var displayBuffer))
-    {
-        Interlocked.Exchange(
-            ref _hdrOutputRequested,
-            IsHdrPixelFormat(displayBuffer.PixelFormat) ? 1 : 0);
-
-        guestImageAddress = displayBuffer.Address;
+            try
+            {
+                for (var i = 0; i < flipEventCount; i++)
+                {
+                    _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
+                        flipEvents[i].Equeue,
+                        SceVideoOutInternalEventFlip,
+                        OrbisKernelEventFilterVideoOut,
+                        eventHint,
+                        flipEvents[i].UserData);
+                }
+            }
+            finally
+            {
+                ArrayPool<FlipEventRegistration>.Shared.Return(flipEvents);
+                flipEvents = null;
+            }
+        }
 
         if (submitGpuImage)
         {
-            DebugFlip("07 before TrySubmitGuestImage");
-
-            guestImageSubmitted =
-                GuestGpu.Current.TrySubmitGuestImage(
-                    displayBuffer.Address,
-                    displayBuffer.Width,
-                    displayBuffer.Height,
-                    displayBuffer.PitchInPixel);
-
-            DebugFlip(
-                $"08 after TrySubmitGuestImage result={guestImageSubmitted}");
+            TriggerFlipEvents();
         }
-    }
+        else if (GuestGpu.Current.SubmitOrderedGuestAction(
+                     TriggerFlipEvents,
+                     $"videoout flip complete handle={handle} index={bufferIndex}") == 0)
+        {
+            // Headless startup has no render queue to order against.
+            TriggerFlipEvents();
+        }
 
-    if (_dumpVideoOut)
-    {
-        DebugFlip("09 before dump");
-        _ = TryDumpFrame(
-            ctx,
-            port,
+        TraceVideoOut(
+            $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
+            $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
+            $"events={flipEventCount} ordered_completion={!submitGpuImage}");
+        LoadProgressDiagnostics.TraceFlipSubmit(
+            handle,
             bufferIndex,
             flipMode,
-            flipArg);
-        DebugFlip("10 after dump");
-    }
-
-    void TriggerFlipEvents()
-    {
-        if (flipEvents is null)
+            submitGpuImage,
+            guestImageSubmitted,
+            guestImageAddress,
+            flipEventCount);
+        LoadProgressDiagnostics.TraceGpuWaitSnapshot(ctx.Memory);
+        ReportFrameRate(presented: false);
+        var diagnosticFlipNumber = Interlocked.Increment(ref _diagnosticFlipCount);
+        if (_holdFirstFlipMilliseconds > 0 && diagnosticFlipNumber == _holdFlipNumber)
         {
-            return;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Holding guest flip #{diagnosticFlipNumber} for {_holdFirstFlipMilliseconds} ms for visual verification.");
+            Thread.Sleep(_holdFirstFlipMilliseconds);
         }
-
-        try
-        {
-            for (var i = 0; i < flipEventCount; i++)
-            {
-                _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
-                    flipEvents[i].Equeue,
-                    SceVideoOutInternalEventFlip,
-                    OrbisKernelEventFilterVideoOut,
-                    eventHint,
-                    flipEvents[i].UserData);
-            }
-        }
-        finally
-        {
-            ArrayPool<FlipEventRegistration>.Shared.Return(
-                flipEvents);
-
-            flipEvents = null;
-        }
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
-
-    DebugFlip(
-        $"11 before events count={flipEventCount}");
-
-    if (submitGpuImage)
-    {
-        TriggerFlipEvents();
-    }
-    else if (GuestGpu.Current.SubmitOrderedGuestAction(
-                 TriggerFlipEvents,
-                 $"videoout flip complete handle={handle} index={bufferIndex}") == 0)
-    {
-        TriggerFlipEvents();
-    }
-
-    DebugFlip("12 after events");
-
-    TraceVideoOut(
-        $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
-        $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
-        $"events={flipEventCount} ordered_completion={!submitGpuImage}");
-
-    DebugFlip("13 before TraceFlipSubmit");
-
-    LoadProgressDiagnostics.TraceFlipSubmit(
-        handle,
-        bufferIndex,
-        flipMode,
-        submitGpuImage,
-        guestImageSubmitted,
-        guestImageAddress,
-        flipEventCount);
-
-    DebugFlip("14 after TraceFlipSubmit");
-
-    DebugFlip("15 before TraceGpuWaitSnapshot");
-
-    LoadProgressDiagnostics.TraceGpuWaitSnapshot(
-        ctx.Memory);
-
-    DebugFlip("16 after TraceGpuWaitSnapshot");
-
-    ReportFrameRate(presented: false);
-
-    DebugFlip("17 after ReportFrameRate");
-
-    var diagnosticFlipNumber =
-        Interlocked.Increment(
-            ref _diagnosticFlipCount);
-
-    if (_holdFirstFlipMilliseconds > 0 &&
-        diagnosticFlipNumber == _holdFlipNumber)
-    {
-        Console.Error.WriteLine(
-            $"[LOADER][INFO] Holding guest flip #{diagnosticFlipNumber} " +
-            $"for {_holdFirstFlipMilliseconds} ms for visual verification.");
-
-        Thread.Sleep(
-            _holdFirstFlipMilliseconds);
-    }
-
-    DebugFlip("18 RETURN");
-
-    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-}
 
 
     internal static void ReportPresentedFrame() =>

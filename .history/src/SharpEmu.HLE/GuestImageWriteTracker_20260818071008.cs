@@ -183,250 +183,133 @@ private static long _diagPrintedEpoch;
     /// fault arrives — a cold signal path is silently never entered there.
     /// </summary>
     public static void WarmUp()
-{
-    if (!_enabled)
     {
-        return;
-    }
-
-    var scratch = OperatingSystem.IsWindows()
-        ? VirtualAlloc(
-            0,
-            4096,
-            MemCommit | MemReserve,
-            PageReadWrite)
-        : (nint)NativeMemory.AllocZeroed(4096);
-
-    if (scratch == 0)
-    {
-        return;
-    }
-
-    try
-    {
-        _ = GetMonotonicNanoseconds();
-
-        var address = (ulong)scratch;
-
-        Track(
-            address,
-            4096);
-
-        _ = TryHandleWriteFault(
-            address);
-
-        _ = ConsumeDirty(
-            address);
-
-        Untrack(
-            address);
-    }
-    finally
-    {
-        if (OperatingSystem.IsWindows())
+        if (!_enabled)
         {
-            _ = VirtualFree(
-                scratch,
-                0,
-                MemRelease);
-        }
-        else
-        {
-            NativeMemory.Free(
-                (void*)scratch);
+            return;
         }
 
-        /*
-         * WarmUp intentionally exercises TryHandleWriteFault directly.
-         * Do not let those synthetic calls pollute the real-fault
-         * diagnostics.
-         */
-        Interlocked.Exchange(ref _diagFaultEnter, 0);
-        Interlocked.Exchange(ref _diagFaultMatched, 0);
-        Interlocked.Exchange(ref _diagBeforeUnprotect, 0);
-        Interlocked.Exchange(ref _diagAfterUnprotect, 0);
-        Interlocked.Exchange(ref _diagMarkedDirty, 0);
-        Interlocked.Exchange(ref _diagReturnTrue, 0);
-        Interlocked.Exchange(ref _diagEpoch, 0);
-        Interlocked.Exchange(ref _diagPrintedEpoch, 0);
+        // VirtualProtect only belongs on VirtualAlloc/mmap pages. Warming on
+        // CRT heap memory makes neighbouring heap metadata read-only and
+        // crashes the process on Windows.
+        var scratch = OperatingSystem.IsWindows()
+            ? VirtualAlloc(0, 4096, MemCommit | MemReserve, PageReadWrite)
+            : (nint)NativeMemory.AllocZeroed(4096);
+        if (scratch == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            // Warm the timestamp P/Invoke used by the signal-safe scalar
+            // capture path before a real protected-page write reaches it.
+            _ = GetMonotonicNanoseconds();
+            var address = (ulong)scratch;
+            Track(address, 4096);
+            _ = TryHandleWriteFault(address);
+            _ = ConsumeDirty(address);
+            Untrack(address);
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                _ = VirtualFree(scratch, 0, MemRelease);
+            }
+            else
+            {
+                NativeMemory.Free((void*)scratch);
+            }
+        }
     }
-}
+
     /// <summary>
     /// Registers a range. When <paramref name="protect"/> is true, arms write
     /// protection so native stores fault and mark the range dirty. When false,
     /// the range is watch-only (managed HLE writes still dirty via
     /// <see cref="NotifyManagedWrite"/>) and never <c>VirtualProtect</c>'d.
     /// </summary>
-public static void Track(
-    ulong address,
-    ulong byteCount,
-    long sourceSequence = 0,
-    string source = "unspecified",
-    bool protect = true)
-{
-    if (!_enabled || address == 0 || byteCount == 0)
+    public static void Track(
+        ulong address,
+        ulong byteCount,
+        long sourceSequence = 0,
+        string source = "unspecified",
+        bool protect = true)
     {
-        return;
-    }
-
-    var (start, length) = PageAlign(address, byteCount);
-
-    lock (_gate)
-    {
-        _rangesByAddress.TryGetValue(
-            address,
-            out var range);
-
-        var shouldArm = false;
-        var rebuildSnapshot = false;
-
-        /*
-         * Existing allocation changed size/page coverage.
-         *
-         * Retire the old object because it may still be visible from the
-         * lock-free fault-handler snapshot.
-         */
-        if (range is not null &&
-            (range.Start != start ||
-             range.End != start + length ||
-             range.ByteCount != byteCount))
+        if (!_enabled || address == 0 || byteCount == 0)
         {
-            var writeGeneration =
-                Volatile.Read(
-                    ref range.WriteGeneration);
-
-            var keepProtect =
-                range.Protect || protect;
-
-            DisarmLocked(
-                range,
-                "replace-range");
-
-            _rangesByAddress.Remove(
-                address);
-
-            range = new TrackedRange
-            {
-                Address = address,
-                ByteCount = byteCount,
-                Start = start,
-                End = start + length,
-                Protect = keepProtect,
-                WriteGeneration = writeGeneration,
-            };
-
-            _rangesByAddress[address] =
-                range;
-
-            rebuildSnapshot = true;
-
-            /*
-             * Fresh replacement range needs initial protection.
-             */
-            shouldArm =
-                range.Protect;
+            return;
         }
 
-        /*
-         * First registration.
-         */
-        if (range is null)
+        var (start, length) = PageAlign(address, byteCount);
+        lock (_gate)
         {
-            range = new TrackedRange
+            _rangesByAddress.TryGetValue(address, out var range);
+            if (range is not null &&
+                (range.Start != start ||
+                 range.End != start + length ||
+                 range.ByteCount != byteCount))
             {
-                Address = address,
-                ByteCount = byteCount,
-                Start = start,
-                End = start + length,
-                Protect = protect,
-                TraceLifetime =
-                    ShouldTraceRange(
-                        start,
-                        start + length) ||
-                    ShouldTraceSource(
-                        source),
-                SourceSequence = sourceSequence,
-                Source = source,
-            };
+                // Never resize an object that is still reachable from the
+                // signal handler's lock-free snapshot. Retire it and publish
+                // a fresh immutable range, carrying the write generation so
+                // resizes do not hide guest CPU rewrites from cache owners.
+                var writeGeneration = Volatile.Read(ref range.WriteGeneration);
+                var keepProtect = range.Protect || protect;
+                DisarmLocked(range, "replace-range");
+                _rangesByAddress.Remove(address);
+                range = new TrackedRange
+                {
+                    Address = address,
+                    ByteCount = byteCount,
+                    Start = start,
+                    End = start + length,
+                    Protect = keepProtect,
+                    WriteGeneration = writeGeneration,
+                };
+                _rangesByAddress[address] = range;
+                RebuildSnapshotLocked();
+            }
 
-            _rangesByAddress[address] =
-                range;
-
-            rebuildSnapshot = true;
-
-            /*
-             * First registration is the only normal Track() operation that
-             * should arm page protection.
-             *
-             * After the first CPU write the range must remain writable until
-             * the video backend explicitly consumes the dirty contents and
-             * calls Rearm().
-             */
-            shouldArm =
-                range.Protect;
-        }
-        else
-        {
-            FlushPendingFirstCpuWrite(
-                range);
-
-            /*
-             * Protect is sticky.
-             *
-             * A watch-only texture-cache registration must not disable an
-             * existing protected render target.
-             *
-             * Conversely, promotion from watch-only -> protected must publish
-             * the range into the fault-handler snapshot and arm it once.
-             */
-            if (protect &&
-                !range.Protect)
+            if (range is null)
             {
-                range.Protect = true;
+                range = new TrackedRange
+                {
+                    Address = address,
+                    ByteCount = byteCount,
+                    Start = start,
+                    End = start + length,
+                    Protect = protect,
+                    TraceLifetime =
+                        ShouldTraceRange(start, start + length) || ShouldTraceSource(source),
+                    SourceSequence = sourceSequence,
+                    Source = source,
+                };
+                _rangesByAddress[address] = range;
+                RebuildSnapshotLocked();
+            }
+            else
+            {
+                FlushPendingFirstCpuWrite(range);
+                // Protect is sticky: a later watch-only Track (texture cache)
+                // must not disarm an RT that already needs page faults.
+                if (protect && !range.Protect)
+                {
+                    range.Protect = true;
+                }
+            }
 
-                rebuildSnapshot = true;
-                shouldArm = true;
+            range.SourceSequence = sourceSequence;
+            range.Source = source;
+            range.TraceLifetime =
+                ShouldTraceRange(range.Start, range.End) || ShouldTraceSource(source);
+            if (range.Protect)
+            {
+                ArmLocked(range, "arm");
             }
         }
-
-        range.SourceSequence =
-            sourceSequence;
-
-        range.Source =
-            source;
-
-        range.TraceLifetime =
-            ShouldTraceRange(
-                range.Start,
-                range.End) ||
-            ShouldTraceSource(
-                source);
-
-        if (rebuildSnapshot)
-        {
-            RebuildSnapshotLocked();
-        }
-
-        /*
-         * CRITICAL:
-         *
-         * Do NOT ArmLocked() on every repeated Track().
-         *
-         * Track() means "this allocation is tracked".
-         * Rearm() means "the backend has consumed the CPU-written contents
-         * and it is now safe to catch the next write".
-         *
-         * Re-arming from Track() races active guest CPU drawing and can
-         * repeatedly make pages readonly while the guest is still writing.
-         */
-        if (shouldArm)
-        {
-            ArmLocked(
-                range,
-                "arm");
-        }
     }
-}
 
     public static void Untrack(ulong address)
     {

@@ -1,4 +1,4 @@
 LDLIBS := \
-  -lSceVideoOut -lkernel
+  -lSceVideoOut
 
 include ../../common.mk
