@@ -14,6 +14,8 @@ typedef int (*vps5_dlsym_fn)(
 
 typedef uint64_t (*vps5_probe_fn)(void);
 
+typedef int (*vps5_getpid_fn)(void);
+
 #define VPS5_DLSYM_PROBE_MAGIC 0x56505335444C5359ULL
 
 /*
@@ -29,6 +31,8 @@ int main(void)
 {
     void *dlsym_addr = 0;
     void *probe_addr = 0;
+    void *hle_addr = 0;
+    void *hle_addr_again = 0;
     void *missing_addr = (void *)(uintptr_t)0x123456789ABCDEF0ULL;
 
     /*
@@ -61,6 +65,44 @@ int main(void)
      * The resolved address must be callable and reach the right function.
      */
     if (((vps5_probe_fn)probe_addr)() != VPS5_DLSYM_PROBE_MAGIC) {
+        __builtin_trap();
+    }
+
+    /*
+     * A host-implemented export this guest never statically imported: the ELF
+     * has no import stub for it, so the runtime must materialize a callable
+     * entry rather than report the symbol missing.  Deliberately reached only
+     * through a function pointer so no import stub is emitted for it.
+     */
+    if (((vps5_dlsym_fn)dlsym_addr)(
+            0x2001,
+            "getpid",
+            &hle_addr) != 0) {
+        __builtin_trap();
+    }
+
+    if (hle_addr == 0) {
+        __builtin_trap();
+    }
+
+    /*
+     * Repeated lookups of the same export must return one stable address.
+     */
+    if (((vps5_dlsym_fn)dlsym_addr)(
+            0x2001,
+            "getpid",
+            &hle_addr_again) != 0) {
+        __builtin_trap();
+    }
+
+    if (hle_addr_again != hle_addr) {
+        __builtin_trap();
+    }
+
+    /*
+     * The materialized address must dispatch the real HLE implementation.
+     */
+    if (((vps5_getpid_fn)hle_addr)() <= 0) {
         __builtin_trap();
     }
 

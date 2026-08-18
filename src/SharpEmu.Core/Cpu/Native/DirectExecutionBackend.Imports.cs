@@ -194,12 +194,15 @@ public sealed partial class DirectExecutionBackend
 			LastError = "Import dispatch called without active CPU context";
 			return 18446744071562199298uL;
 		}
-		if ((uint)importIndex >= (uint)_importEntries.Length)
+		// Snapshot: dynamic dlsym thunks append to this table from guest threads
+		// by publishing a grown copy.
+		var importEntries = Volatile.Read(ref _importEntries);
+		if ((uint)importIndex >= (uint)importEntries.Length)
 		{
 			LastError = $"Import dispatch index out of range: {importIndex}";
 			return 18446744071562199042uL;
 		}
-		ImportStubEntry importStubEntry = _importEntries[importIndex];
+		ImportStubEntry importStubEntry = importEntries[importIndex];
 		if (_perfHleHistogram)
 		{
 			RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid);
@@ -553,10 +556,13 @@ public sealed partial class DirectExecutionBackend
 				{
 					orbisGen2Result = DispatchBootstrapBridge();
 				}
-				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
-					string.Equals(importStubEntry.Nid, "LwG8g3niqwA", StringComparison.Ordinal))
+				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal))
 				{
 					orbisGen2Result = DispatchKernelDynlibDlsym();
+				}
+				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.SceKernelDlsym, StringComparison.Ordinal))
+				{
+					orbisGen2Result = DispatchSceKernelDlsym();
 				}
 				else if (string.Equals(importStubEntry.Nid, "r8mvOaWdi28", StringComparison.Ordinal))
 				{
@@ -2120,6 +2126,42 @@ public sealed partial class DirectExecutionBackend
 		return num;
 	}
 
+	/// <summary>
+	/// Public libKernel ABI: <c>int sceKernelDlsym(SceKernelModule handle,
+	/// const char *symbol, void **addrp)</c>. The address is an out-parameter and
+	/// the return value is a status. The payload bootstrap callback
+	/// (<c>payload_args::sys_dynlib_dlsym</c>) has the same shape.
+	/// </summary>
+	private OrbisGen2Result DispatchSceKernelDlsym()
+	{
+		var cpuContext = ActiveCpuContext;
+		if (cpuContext == null)
+		{
+			return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+		}
+
+		var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rdi]);
+		var symbolNameAddress = cpuContext[CpuRegister.Rsi];
+		var outputAddress = cpuContext[CpuRegister.Rdx];
+		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
+			!TryResolveDlsymSymbol(moduleHandle, symbolName, out var resolvedAddress) ||
+			outputAddress == 0 ||
+			!TryWriteUInt64Compat(outputAddress, resolvedAddress))
+		{
+			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
+			return OrbisGen2Result.ORBIS_GEN2_OK;
+		}
+
+		cpuContext[CpuRegister.Rax] = 0uL;
+		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	/// <summary>
+	/// Internal libKernel ABI: <c>intptr_t kernel_dynlib_dlsym(pid_t pid,
+	/// uint32_t handle, const char *sym)</c>. The resolved address *is* the
+	/// return value, and 0 means "not found" — the caller has no out-parameter
+	/// and no status to inspect.
+	/// </summary>
 	private OrbisGen2Result DispatchKernelDynlibDlsym()
 	{
 		var cpuContext = ActiveCpuContext;
@@ -2127,37 +2169,55 @@ public sealed partial class DirectExecutionBackend
 		{
 			return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
 		}
-		ulong symbolNameAddress = cpuContext[CpuRegister.Rsi];
-		ulong outputAddress = cpuContext[CpuRegister.Rdx];
-		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
+
+		var processId = unchecked((int)cpuContext[CpuRegister.Rdi]);
+		var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rsi]);
+		var symbolNameAddress = cpuContext[CpuRegister.Rdx];
+		if (!IsSelfProcessId(processId) ||
+			!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
+			!TryResolveDlsymSymbol(moduleHandle, symbolName, out var resolvedAddress))
 		{
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
+			cpuContext[CpuRegister.Rax] = 0uL;
 			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
-		var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rdi]);
-		if (!TryResolveModuleSymbolAddress(moduleHandle, symbolName, out var resolvedAddress) &&
-			!TryResolveRuntimeSymbolAddress(symbolName, out resolvedAddress) &&
-			!TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out resolvedAddress) &&
-			!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress) &&
-			!TryResolveKernelDlsymSelfAddress(symbolName, out resolvedAddress))
-		{
-			Console.Error.WriteLine(
-				$"[LOADER][WARN] sceKernelDlsym failed: handle=0x{cpuContext[CpuRegister.Rdi]:X} symbol='{symbolName}'");
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
-		}
-		if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
-		{
-			Console.Error.WriteLine(
-				$"[LOADER][TRACE] sceKernelDlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{resolvedAddress:X16}");
-		}
-		if (outputAddress == 0L || !TryWriteUInt64Compat(outputAddress, resolvedAddress))
-		{
-			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
-		}
-		cpuContext[CpuRegister.Rax] = 0uL;
+
+		cpuContext[CpuRegister.Rax] = resolvedAddress;
 		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	// kernel_dynlib_dlsym takes an explicit pid so a jailbroken payload can
+	// inspect another process. We only own this one, and -1 is the caller-side
+	// idiom for "self".
+	private static bool IsSelfProcessId(int processId) =>
+		processId == -1 || processId == Environment.ProcessId;
+
+	/// <summary>
+	/// ABI-independent dlsym resolution shared by every dlsym entry point.
+	/// </summary>
+	private bool TryResolveDlsymSymbol(int moduleHandle, string symbolName, out ulong address)
+	{
+		if (TryResolveModuleSymbolAddress(moduleHandle, symbolName, out address) ||
+			TryResolveRuntimeSymbolAddress(symbolName, out address) ||
+			TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out address) ||
+			TryResolveRuntimeSymbolAlias(symbolName, out address) ||
+			TryResolveKernelDlsymSelfAddress(symbolName, out address) ||
+			// Last: an HLE export the guest never statically imported has no
+			// import stub to hand back, so materialize one.
+			TryResolveDynamicHleThunkAddress(symbolName, out address))
+		{
+			if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] dlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{address:X16}");
+			}
+
+			return true;
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] dlsym failed: handle=0x{moduleHandle:X} symbol='{symbolName}'");
+		address = 0;
+		return false;
 	}
 
 	private static bool TryResolveModuleSymbolAddress(int moduleHandle, string symbolName, out ulong address)
@@ -2197,7 +2257,7 @@ public sealed partial class DirectExecutionBackend
 		// back a guest-callable stub that dispatches this same handler.
 		address = 0;
 		if (!string.Equals(symbolName, "sceKernelDlsym", StringComparison.Ordinal) &&
-			!string.Equals(symbolName, "LwG8g3niqwA", StringComparison.Ordinal))
+			!string.Equals(symbolName, RuntimeStubNids.SceKernelDlsym, StringComparison.Ordinal))
 		{
 			return false;
 		}
@@ -2275,7 +2335,7 @@ public sealed partial class DirectExecutionBackend
 		ulong outputAddress = cpuContext[CpuRegister.Rdx];
 		_ = TryReadAsciiZ(symbolNameAddress, 512, out var symbolName);
 
-		OrbisGen2Result result = DispatchKernelDynlibDlsym();
+		OrbisGen2Result result = DispatchSceKernelDlsym();
 		if (result != OrbisGen2Result.ORBIS_GEN2_OK)
 		{
 			return result;

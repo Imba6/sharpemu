@@ -24,7 +24,7 @@
     "static_nids_resolved": 205,
     "imported_data_rebound": 0,
     "imported_data_unresolved": 5,
-    "stall_import_stub": "__internal_kernel_dynlib_dlsym"
+    "stall_import_stub": "__internal_bootstrap_bridge"
   },
   "summary": {
     "imports_total": 205,
@@ -36,19 +36,7 @@
     "blocking": 0
   },
   "blockers": [],
-  "dynamic_requests": [
-    {
-      "name": "getpid",
-      "nid": "HoLVWNanBBc",
-      "library": "libKernel",
-      "kind": "dynamic-symbol",
-      "status": "implemented",
-      "priority": 100,
-      "requests": 4,
-      "provider": "sharpemu",
-      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelRuntimeCompatExports.cs"
-    }
-  ],
+  "dynamic_requests": [],
   "imports": [
     {
       "name": "_Exit",

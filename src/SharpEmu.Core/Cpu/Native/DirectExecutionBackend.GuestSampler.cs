@@ -67,7 +67,8 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		var importIndex = context.ActiveImportIndex;
-		if ((uint)importIndex >= (uint)_importEntries.Length)
+		var importEntries = Volatile.Read(ref _importEntries);
+		if ((uint)importIndex >= (uint)importEntries.Length)
 		{
 			// Host code with no import in flight: the thread is parked by the
 			// emulator's own scheduler. The cooperative block records why, which
@@ -78,7 +79,7 @@ public sealed partial class DirectExecutionBackend
 				: $"blocked:{blockReason}";
 		}
 
-		var entry = _importEntries[importIndex];
+		var entry = importEntries[importIndex];
 		return entry.Export?.Name ?? entry.Nid;
 	}
 
@@ -309,11 +310,12 @@ public sealed partial class DirectExecutionBackend
 			return $"(app+0x{address - GuestImageBase:X})";
 		}
 
-		for (var index = 0; index < _importEntries.Length; index++)
+		var entries = Volatile.Read(ref _importEntries);
+		for (var index = 0; index < entries.Length; index++)
 		{
-			if (_importEntries[index].Address == (address & ~0xFUL))
+			if (entries[index].Address == (address & ~0xFUL))
 			{
-				return $"(stub:{_importEntries[index].Nid})";
+				return $"(stub:{entries[index].Nid})";
 			}
 		}
 

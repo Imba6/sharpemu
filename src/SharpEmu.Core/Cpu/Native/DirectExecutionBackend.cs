@@ -288,6 +288,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly List<nint> _importHandlerTrampolines = new List<nint>();
 
+	// Dynamic dlsym thunks are allocated from guest threads, so the
+	// trampoline ownership list is no longer setup-time-only.
+	private readonly object _importHandlerTrampolineGate = new();
+
 	private const int GuestContextTransferFrameQwords = 20;
 
 	private readonly object _guestContextTransferStubGate = new();
@@ -306,8 +310,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
-	// Guest-callable stub that dispatches DispatchKernelDynlibDlsym, so
-	// sceKernelDlsym can resolve itself for payload-style bootstraps.
+	// Guest-callable public-ABI dlsym stub, so sceKernelDlsym can resolve
+	// itself for payload-style bootstraps.
 	private ulong _guestDlsymStubAddress;
 
 	private bool _guestDlsymStubIsBootstrap;
@@ -1361,9 +1365,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
+		// Only public-ABI entries qualify. The internal kernel_dynlib_dlsym stub
+		// takes (pid, handle, symbol) and returns the address in RAX, so handing
+		// it back as "sceKernelDlsym" would hand the guest a mismatched callee.
 		if (_guestDlsymStubIsBootstrap ||
-			(!string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) &&
-			 !string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal)))
+			!string.Equals(nid, RuntimeStubNids.SceKernelDlsym, StringComparison.Ordinal))
 		{
 			return;
 		}
@@ -1660,7 +1666,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		FlushInstructionCache(GetCurrentProcess(), memory, (nuint)code.Length);
 		address = (nint)memory;
-		_importHandlerTrampolines.Add(address);
+		lock (_importHandlerTrampolineGate)
+		{
+			_importHandlerTrampolines.Add(address);
+		}
 		return true;
 	}
 
@@ -2149,7 +2158,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return 0;
 		}
-		_importHandlerTrampolines.Add((nint)ptr);
+		lock (_importHandlerTrampolineGate)
+		{
+			_importHandlerTrampolines.Add((nint)ptr);
+		}
 		try
 		{
 			byte* ptr2 = (byte*)ptr;
@@ -2339,14 +2351,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void ClearImportHandlerTrampolines()
 	{
-		foreach (nint importHandlerTrampoline in _importHandlerTrampolines)
+		// Dynamic dlsym thunks are backed by entries in this list, so their
+		// cached addresses die with it.
+		ClearDynamicHleThunks();
+		lock (_importHandlerTrampolineGate)
 		{
-			if (importHandlerTrampoline != 0)
+			foreach (nint importHandlerTrampoline in _importHandlerTrampolines)
 			{
-				VirtualFree((void*)importHandlerTrampoline, 0u, 32768u);
+				if (importHandlerTrampoline != 0)
+				{
+					VirtualFree((void*)importHandlerTrampoline, 0u, 32768u);
+				}
 			}
+			_importHandlerTrampolines.Clear();
 		}
-		_importHandlerTrampolines.Clear();
 	}
 
 	private unsafe void CreateTlsHandler()
@@ -6574,7 +6592,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		var importAddress = cpuContext.Rip & 0xFFFFFFFFFFFFFFF0uL;
-		foreach (var entry in _importEntries)
+		foreach (var entry in Volatile.Read(ref _importEntries))
 		{
 			if (entry.Address != importAddress)
 			{
@@ -6799,13 +6817,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ulong rsp = cpuContext[CpuRegister.Rsp];
 			Console.Error.WriteLine($"[LOADER][ERROR] Stall snapshot: rip=0x{cpuContext.Rip:X16} rsp=0x{rsp:X16} rbp=0x{cpuContext[CpuRegister.Rbp]:X16} rax=0x{cpuContext[CpuRegister.Rax]:X16} rbx=0x{cpuContext[CpuRegister.Rbx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdi=0x{cpuContext[CpuRegister.Rdi]:X16}");
 			ulong num = cpuContext.Rip & 0xFFFFFFFFFFFFFFF0uL;
-			for (int i = 0; i < _importEntries.Length; i++)
+			var importEntries = Volatile.Read(ref _importEntries);
+			for (int i = 0; i < importEntries.Length; i++)
 			{
-				if (_importEntries[i].Address != num)
+				if (importEntries[i].Address != num)
 				{
 					continue;
 				}
-				string text = _importEntries[i].Nid;
+				string text = importEntries[i].Nid;
 				if (_moduleManager.TryGetExport(text, out ExportedFunction export))
 				{
 					Console.Error.WriteLine($"[LOADER][ERROR] Stall import-stub: rip=0x{num:X16} nid={text} -> {export.LibraryName}:{export.Name}");

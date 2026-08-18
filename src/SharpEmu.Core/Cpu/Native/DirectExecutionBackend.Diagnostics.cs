@@ -334,14 +334,15 @@ public sealed partial class DirectExecutionBackend
 			ulong callRip = returnRip + (ulong)i;
 			ulong target = unchecked((ulong)((long)(callRip + 5) + rel32));
 			Log.Debug($"Import#{dispatchIndex} near-call @{callRip:X16}: target=0x{target:X16}");
-			for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
+			var importEntries = Volatile.Read(ref _importEntries);
+			for (int importIndex = 0; importIndex < importEntries.Length; importIndex++)
 			{
-				if (_importEntries[importIndex].Address != target)
+				if (importEntries[importIndex].Address != target)
 				{
 					continue;
 				}
 
-				string nid = _importEntries[importIndex].Nid;
+				string nid = importEntries[importIndex].Nid;
 				if (_moduleManager.TryGetExport(nid, out var export))
 				{
 					Log.Debug(
@@ -368,14 +369,15 @@ public sealed partial class DirectExecutionBackend
 					{
 						Log.Debug(
 							$"Import#{dispatchIndex} near-call PLT slot: [0x{slot:X16}] = 0x{slotTarget:X16}");
-						for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
+						var slotEntries = Volatile.Read(ref _importEntries);
+						for (int importIndex = 0; importIndex < slotEntries.Length; importIndex++)
 						{
-							if (_importEntries[importIndex].Address != slotTarget)
+							if (slotEntries[importIndex].Address != slotTarget)
 							{
 								continue;
 							}
 
-							string nid = _importEntries[importIndex].Nid;
+							string nid = slotEntries[importIndex].Nid;
 							if (_moduleManager.TryGetExport(nid, out var export))
 							{
 								Log.Debug(
