@@ -45,3 +45,5 @@ ehthumbs.db
 .vscode/
 clean_test/
 .debug/
+
+.history/
