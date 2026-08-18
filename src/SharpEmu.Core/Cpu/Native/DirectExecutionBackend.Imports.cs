@@ -2138,7 +2138,8 @@ public sealed partial class DirectExecutionBackend
 		if (!TryResolveModuleSymbolAddress(moduleHandle, symbolName, out var resolvedAddress) &&
 			!TryResolveRuntimeSymbolAddress(symbolName, out resolvedAddress) &&
 			!TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out resolvedAddress) &&
-			!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress))
+			!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress) &&
+			!TryResolveKernelDlsymSelfAddress(symbolName, out resolvedAddress))
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] sceKernelDlsym failed: handle=0x{cpuContext[CpuRegister.Rdi]:X} symbol='{symbolName}'");
@@ -2187,6 +2188,22 @@ public sealed partial class DirectExecutionBackend
 		Span<byte> bigEndianValue = stackalloc byte[sizeof(ulong)];
 		BinaryPrimitives.WriteUInt64BigEndian(bigEndianValue, value);
 		return Convert.ToBase64String(bigEndianValue).TrimEnd('=').Replace('/', '-');
+	}
+
+	private bool TryResolveKernelDlsymSelfAddress(string symbolName, out ulong address)
+	{
+		// Payload-style bootstraps resolve sceKernelDlsym through the loader
+		// dlsym they receive (handles 0x1/0x2001) before anything else. Hand
+		// back a guest-callable stub that dispatches this same handler.
+		address = 0;
+		if (!string.Equals(symbolName, "sceKernelDlsym", StringComparison.Ordinal) &&
+			!string.Equals(symbolName, "LwG8g3niqwA", StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		address = _guestDlsymStubAddress;
+		return address != 0;
 	}
 
 	private bool TryResolveRuntimeSymbolAlias(string symbolName, out ulong address)

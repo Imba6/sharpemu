@@ -306,6 +306,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
+	// Guest-callable stub that dispatches DispatchKernelDynlibDlsym, so
+	// sceKernelDlsym can resolve itself for payload-style bootstraps.
+	private ulong _guestDlsymStubAddress;
+
+	private bool _guestDlsymStubIsDedicated;
+
 	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
 
 	private int _recentImportTraceCount;
@@ -1251,6 +1257,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] Setting up {importStubs.Count} import stubs...");
 		ClearImportHandlerTrampolines();
+		_guestDlsymStubAddress = 0;
+		_guestDlsymStubIsDedicated = false;
 		_importEntries = new ImportStubEntry[importStubs.Count];
 		HashSet<ulong> hashSet = new HashSet<ulong>(importStubs.Keys);
 		int num = 0;
@@ -1258,6 +1266,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int num3 = 0;
 		foreach (var (num4, text2) in importStubs)
 		{
+			RecordGuestDlsymStubCandidate(num4, text2);
 			_ = _moduleManager.TryGetExport(text2, out var resolvedExport);
 			_importEntries[num] = new ImportStubEntry(
 				num4,
@@ -1331,6 +1340,33 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3})");
 		return num2 == importStubs.Count;
+	}
+
+	private void RecordGuestDlsymStubCandidate(ulong stubAddress, string nid)
+	{
+		if (string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
+			string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal))
+		{
+			if (!_guestDlsymStubIsDedicated || stubAddress < _guestDlsymStubAddress)
+			{
+				_guestDlsymStubAddress = stubAddress;
+				_guestDlsymStubIsDedicated = true;
+			}
+			return;
+		}
+
+		if (_guestDlsymStubIsDedicated ||
+			!string.Equals(nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		// The bridge is registered twice (slot base and its jmp at +0x0A);
+		// only the slot base is safely callable as a function entry.
+		if (_guestDlsymStubAddress == 0 || stubAddress < _guestDlsymStubAddress)
+		{
+			_guestDlsymStubAddress = stubAddress;
+		}
 	}
 
 	private unsafe bool TryCreateNativeImportIntrinsic(string nid, out nint address)
