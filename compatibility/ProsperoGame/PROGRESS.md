@@ -284,17 +284,63 @@ With M14 the entire low-risk fallback backlog from the task is implemented and
 tested (integer conversions, condattr clock, current cpu, pthread_sigmask, bcmp,
 sched_yield, time, strerror/strerror_r, strtok_r, srand48/lrand48, ceil, log).
 
+### M15 — present tiled CPU framebuffers (visible frame)
+
+- Commit: (this milestone)
+- Area: VideoOut CPU scan-out. New `src/SharpEmu.Libs/VideoOut/VideoOutScanoutDetile.cs`;
+  wired into `VulkanVideoPresenter` bootstrap + per-frame refresh of CPU display buffers.
+- Before: the game reached its frame loop but every frame presented black
+  (`hasPixels=False`). The presenter only materialised *linear* display buffers
+  (`TryBootstrapCpuDisplayBuffer` bailed on `TilingMode != 1`); ProsperoGame
+  registers a **tiled** scan-out buffer (`tile=0`, BGRA8-sRGB, 1920x1080), so no
+  pixels were ever uploaded.
+- Architecture chosen: a small, Vulkan-independent scan-out detile helper that
+  reads the registered tiled buffer from guest memory and deswizzles it to linear
+  BGRA before the existing GuestImageResource upload. No AGC command processor,
+  no GPU rendering — a pure CPU scan-out detile driven entirely by the registered
+  VideoOut metadata (width/height/format/tiling/address).
+- Tiled layout supported: GFX10 `SW_64KB_R_X` (AGC `RenderTarget` tile mode), 2D,
+  single-sample, one mip, 32bpp BGRA/RGBA — exactly what ProsperoGame registers.
+  The block is a 128x128 element grid (64 KiB); the within-block byte offset is the
+  AMD GFX10 AddrLib R_X equation specialised to 32bpp (`ColumnOffsetX(x) ^
+  BaseOffsetY(y)`), plus whole-block linear indexing. Any other tiled layout stays
+  explicitly `Unsupported` (never misread as linear).
+- Why not reuse GnmTiling: its existing mode-27 texture equation does **not** invert
+  this render-target scan-out tiling (verified: `GnmTiling.Detile(SharpProspero.Tile(L))
+  != L`), so it would present a scrambled frame. The scan-out equation is implemented
+  independently and verified byte-exactly against SharpProspero-tiled fixtures.
+- Tests added: `tests/SharpEmu.Libs.Tests/VideoOut/VideoOutScanoutDetileTests.cs`
+  (6 cases): single-block and multi-block (3x3) detile verified byte-exactly against
+  SharpProspero-generated tiled fixtures (sparse unique-marker images; provenance:
+  SharpProspero used offline only as an oracle, no SharpProspero code referenced),
+  linear passthrough, padded-pitch and unknown-tiling `Unsupported`, unmapped-memory
+  `Fault`. Existing linear `hle-video-out` guest regression still presents
+  (`Result=ORBIS_GEN2_OK`).
+- ProsperoGame before/after: before — frame loop healthy but uniformly black,
+  `present_dropped` every frame, `presented_fps=0`. After — tiled buffers
+  materialise (`tile=0`), frames present with pixels, `present_dropped=0`,
+  `presented_fps ~23` (submitted ~26-28), 0 unresolved imports, 0 dispatch errors.
+- Pixels visible: yes. A temporary runtime check (reverted) confirmed the detiled
+  frame is the game's actual content: top-left pixel `[36,22,16,255]` = BGRA of the
+  gradient top `FromRgb(0x10,0x16,0x24)`, bottom `[14,8,6,255]` = the gradient bottom
+  `FromRgb(0x06,0x08,0x0E)`, center intermediate, and the frame checksum changes each
+  frame (ball/paddle/score moving).
+- FPS impact: presented fps went 0 -> ~23; the per-frame detile of the 1920x1080
+  buffer (a bounded permutation copy into a reused scratch) fits comfortably in the
+  frame budget.
+- Remaining rendering limitation: only the 32bpp `SW_64KB_R_X` scan-out layout is
+  supported (the PS5 main uncompressed render-target case). Other tiled formats/
+  swizzles, HDR/10-bit scan-out, and padded-pitch linear remain unsupported and would
+  fall back to the previous behaviour rather than showing a wrong image.
+- Scanner: SharpEmu 128, Missing 16, Data miss 3, Blockers 0 (unchanged — a
+  rendering feature, not a new import).
+
 ## Current state / remaining work
 
-The target runs its application frame loop cleanly: zero unresolved imports, zero
-HLE dispatch errors, both framebuffers flipping every frame at ~16 submitted fps.
-
-The one remaining gap to a visible frame is architecture-gated and left for a
-supervised decision: frames present black (`vk.present_dropped ... hasPixels=False
-version=0`). SharpProspero draws on the CPU into a tiled scan-out direct-memory
-buffer (`AgcTiler.Tile`), and the Vulkan present path does not surface those
-CPU-written tiled scan-out buffers to the swapchain. Wiring that up is AGC/GPU
-scan-out architecture (out of scope for the unattended pass).
+The target now renders its actual application frame: the game runs its frame loop,
+detiles and presents its CPU-drawn tiled scan-out buffer, and shows the real
+gradient/paddle/ball/score content at ~23 presented fps with zero unresolved
+imports and zero HLE dispatch errors.
 
 Data imports: scanner still reports 3 unresolved-data candidates (Need_sceLibc,
 _Stderr, _Stdout); runtime shows no data-import faults and execution does not

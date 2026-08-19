@@ -14,7 +14,7 @@
     ]
   },
   "runtime": {
-    "log": "/tmp/prospero-game-run.log",
+    "log": "/tmp/prospero-game-tiled.log",
     "static_nids_resolved": 0,
     "imported_data_rebound": 2,
     "imported_data_unresolved": 2,

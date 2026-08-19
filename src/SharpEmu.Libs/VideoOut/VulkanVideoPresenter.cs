@@ -3468,6 +3468,9 @@ internal static unsafe class VulkanVideoPresenter
         private sealed class CpuDisplayFingerprintState
         {
             public byte[] Scratch = [];
+            // Reused raw tiled bytes for a tiled scan-out buffer (larger than the
+            // linear Scratch); stays empty for linear buffers.
+            public byte[]? TiledScratch;
             public ulong UploadedFingerprint;
             public bool HasUploadedFingerprint;
         }
@@ -14319,9 +14322,22 @@ internal static unsafe class VulkanVideoPresenter
                 _cpuDisplayFingerprintStates[image.Address] = state;
             }
 
-            if (!guestMemory.TryRead(
+            // Re-read (and detile, when tiled) the current guest contents into the
+            // linear Scratch. A tiled buffer needs its registration metadata, so
+            // resolve it fresh rather than assuming linear.
+            if (!VideoOutExports.TryGetDisplayBufferInfo(
                     image.Address,
-                    state.Scratch))
+                    out var displayBuffer))
+            {
+                return false;
+            }
+
+            if (VideoOutScanoutDetile.TryReadLinearPixels(
+                    displayBuffer,
+                    guestMemory,
+                    state.Scratch,
+                    ref state.TiledScratch)
+                != VideoOutScanoutDetile.ScanoutReadStatus.Ok)
             {
                 return false;
             }
@@ -14368,19 +14384,14 @@ internal static unsafe class VulkanVideoPresenter
     }
 
     /*
-     * First milestone deliberately supports only the simple
-     * CPU-rendered VideoOut layout we have proven with HomebrewTest:
-     *
-     *   - linear
-     *   - tightly packed
-     *   - 32-bit RGBA/BGRA sRGB
-     *
-     * Tiled / padded display buffers stay on the existing path.
+     * Supported CPU-scanned display buffers are 32-bit RGBA/BGRA sRGB, in either:
+     *   - linear, tightly packed layout; or
+     *   - the PS5 main tiled scan-out layout (SW_64KB_R_X), detiled into linear
+     *     pixels by VideoOutScanoutDetile below.
+     * Padded-pitch linear and any other tiled layout stay unsupported.
      */
-    if (displayBuffer.TilingMode != 1 ||
-        displayBuffer.Width == 0 ||
-        displayBuffer.Height == 0 ||
-        displayBuffer.PitchInPixel != displayBuffer.Width)
+    if (displayBuffer.Width == 0 ||
+        displayBuffer.Height == 0)
     {
         return false;
     }
@@ -14428,9 +14439,13 @@ internal static unsafe class VulkanVideoPresenter
         GC.AllocateUninitializedArray<byte>(
             checked((int)byteCount));
 
-    if (!guestMemory.TryRead(
-            address,
-            pixels))
+    byte[]? tiledScratch = null;
+    if (VideoOutScanoutDetile.TryReadLinearPixels(
+            displayBuffer,
+            guestMemory,
+            pixels,
+            ref tiledScratch)
+        != VideoOutScanoutDetile.ScanoutReadStatus.Ok)
     {
         return false;
     }
@@ -14500,6 +14515,7 @@ internal static unsafe class VulkanVideoPresenter
         $"addr=0x{address:X16} " +
         $"{displayBuffer.Width}x{displayBuffer.Height} " +
         $"pitch={displayBuffer.PitchInPixel} " +
+        $"tile={displayBuffer.TilingMode} " +
         $"pixel=0x{displayBuffer.PixelFormat:X16} " +
         $"vk={imageFormat}");
 
