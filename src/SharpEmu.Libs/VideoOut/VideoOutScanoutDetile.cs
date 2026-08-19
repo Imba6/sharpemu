@@ -164,32 +164,92 @@ internal static class VideoOutScanoutDetile
         return ScanoutReadStatus.Ok;
     }
 
+    // The within-block byte offset for every element of a 128x128 block is the same
+    // for any SW_64KB_R_X 32bpp surface, so build it once. Index by (inBlockY*128 +
+    // inBlockX); the value is the swizzled byte offset inside the 64 KiB block.
+    private static int[]? _blockOffsetTable;
+
+    private static int[] BlockOffsetTable()
+    {
+        var table = _blockOffsetTable;
+        if (table is not null)
+        {
+            return table;
+        }
+
+        table = new int[BlockWidth * BlockHeight];
+        for (int inBlockY = 0; inBlockY < BlockHeight; inBlockY++)
+        {
+            int baseY = BaseOffsetY(inBlockY);
+            int row = inBlockY * BlockWidth;
+            for (int inBlockX = 0; inBlockX < BlockWidth; inBlockX++)
+            {
+                table[row + inBlockX] = ColumnOffsetX(inBlockX) ^ baseY;
+            }
+        }
+
+        _blockOffsetTable = table;
+        return table;
+    }
+
     /// <summary>
     /// Deswizzles a SW_64KB_R_X 32bpp surface into tightly packed linear pixels.
     /// The tiled byte offset of element (x, y) is the whole-block base plus the
     /// swizzled offset within the 64 KiB block; the block is a 128x128 element grid,
-    /// so higher bits of x/y select the block and the low bits drive the swizzle.
+    /// so higher bits of x/y select the block and the low bits index the precomputed
+    /// within-block offset table. The source offset is provably in [0, tiled.Length)
+    /// for a whole-block-sized tiled buffer, so the inner loop copies each 4-byte
+    /// pixel directly with no per-pixel bounds check.
     /// </summary>
-    internal static void Detile32Bpp(ReadOnlySpan<byte> tiled, Span<byte> linear, int width, int height)
+    internal static unsafe void Detile32Bpp(ReadOnlySpan<byte> tiled, Span<byte> linear, int width, int height)
     {
-        int blocksPerRow = (width + BlockWidth - 1) / BlockWidth;
-
-        for (int y = 0; y < height; y++)
+        if (width <= 0 || height <= 0)
         {
-            long blockRow = (long)(y >> 7) * blocksPerRow;
-            int baseY = BaseOffsetY(y);
-            int destRow = y * width * BytesPerPixel;
-            for (int x = 0; x < width; x++)
-            {
-                long blockIndex = blockRow + (x >> 7);
-                long src = (blockIndex << 16) + (ColumnOffsetX(x) ^ baseY);
-                int dst = destRow + x * BytesPerPixel;
-                if (src < 0 || src + BytesPerPixel > tiled.Length || dst + BytesPerPixel > linear.Length)
-                {
-                    continue;
-                }
+            return;
+        }
 
-                tiled.Slice((int)src, BytesPerPixel).CopyTo(linear.Slice(dst, BytesPerPixel));
+        int blocksPerRow = (width + BlockWidth - 1) / BlockWidth;
+        int blocksPerCol = (height + BlockHeight - 1) / BlockHeight;
+
+        // Whole-block source and tightly packed destination must both be present;
+        // validated up front so the hot loop is bounds-check free.
+        long requiredTiled = (long)blocksPerRow * blocksPerCol * BlockBytes;
+        long requiredLinear = (long)width * height * BytesPerPixel;
+        if (tiled.Length < requiredTiled || linear.Length < requiredLinear)
+        {
+            return;
+        }
+
+        int[] table = BlockOffsetTable();
+
+        fixed (byte* tiledBase = tiled)
+        fixed (byte* linearBase = linear)
+        fixed (int* tablePtr = table)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                long blockRow = (long)(y >> 7) * blocksPerRow;
+                int* tableRow = tablePtr + ((y & 127) << 7); // (y&127)*128
+                uint* dst = (uint*)(linearBase + (long)y * width * BytesPerPixel);
+
+                // Blocks are 128 wide; walk each 128-column span with a fixed block base.
+                int x = 0;
+                while (x < width)
+                {
+                    long blockBase = (blockRow + (x >> 7)) << 16;
+                    byte* blockPtr = tiledBase + blockBase;
+                    int inBlockX = x & 127;
+                    int spanEnd = x - inBlockX + BlockWidth;
+                    if (spanEnd > width)
+                    {
+                        spanEnd = width;
+                    }
+
+                    for (; x < spanEnd; x++, inBlockX++)
+                    {
+                        dst[x] = *(uint*)(blockPtr + tableRow[inBlockX]);
+                    }
+                }
             }
         }
     }

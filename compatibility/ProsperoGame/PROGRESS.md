@@ -335,12 +335,64 @@ sched_yield, time, strerror/strerror_r, strtok_r, srand48/lrand48, ceil, log).
 - Scanner: SharpEmu 128, Missing 16, Data miss 3, Blockers 0 (unchanged — a
   rendering feature, not a new import).
 
+### M16 — optimize tiled scan-out presentation (judder profiling)
+
+- Commit: (this milestone)
+- Area: VideoOut CPU scan-out present path (`VideoOutScanoutDetile`,
+  `VulkanVideoPresenter` CPU display-buffer refresh).
+- Motivation: visible judder (~24 fps, ~42 ms avg, ~70 ms max reported by the game
+  overlay). Profiled with temporary per-stage timers over ~120-frame windows
+  (probes reverted before commit).
+- Measured per-frame costs (before optimization, present thread unless noted):
+  - `detile` (VideoOutScanoutDetile.Detile32Bpp): **avg ~42-45 ms**, p95 ~50 ms — dominant.
+  - guest read of tiled buffer: ~0.5 ms.
+  - full-frame fingerprint hash: ~3 ms (never skipped an upload — the app redraws
+    every frame).
+  - Vulkan upload: ~0.7 ms.
+  - flip pacing wait (`PaceFlip`): ~0.001 ms (no double-wait; `WaitVblank` is not
+    called per frame — `WaitUntilOnScreen` returns immediately since flipArg is set
+    on submit). Phase 4 pacing is clean.
+  - guest `Draw` + SharpProspero `AgcTiler.Tile` (guest CPU, bracketed between the
+    flip-status read and the next submit): **avg ~37-62 ms** (high run-to-run
+    variance from WSL2 scheduling).
+- Optimizations (Phase 2 + Phase 3), no equation/layout/semantic change:
+  - Detile hot loop rewritten: precomputed 128x128 within-block source-offset table
+    (built once, layout-invariant), direct 4-byte `uint` copies via `unsafe fixed`
+    pointers, and up-front whole-buffer bounds validation so the inner loop is
+    bounds-check free and walks each 128-column block span with a fixed block base.
+    **Detile: ~42-45 ms -> ~4.6-4.9 ms (about 9x).**
+  - Dropped the per-frame full-frame fingerprint for the CPU scan-out refresh: a
+    submitted flip is sufficient evidence the buffer changed, so it detiles and
+    uploads the submitted frame directly (removes ~3 ms of hashing that never
+    prevented an upload for this always-redrawing app). Scoped to this path;
+    write-fault/fingerprint behaviour elsewhere is unchanged.
+- Result:
+  - Detile is no longer a bottleneck; total present-thread work fell from ~49 ms to
+    ~6 ms, so the present thread now keeps pace with the guest. `presented_fps` now
+    equals `submitted_fps` (e.g. 26.8 == 26.8, `present_dropped` = 0), whereas at
+    M15 the 45 ms detile lagged (presented ~23 vs submitted ~26 — dropped frames,
+    the direct judder source). Every submitted frame is now presented.
+  - Frame rate is now bounded by the guest's own software tile pass, ~16-27 fps and
+    variable run-to-run. That cost is SharpProspero SDK code (an unoptimized
+    per-element `AgcTiler.Tile`, the same per-pixel-equation cost the VirtualPS5
+    detile had before this change) and cannot be reduced from VirtualPS5 without
+    changing game/SDK logic (explicitly out of scope). 60 fps is therefore not
+    reachable here; the exact dominant cost is the guest tile (~37-62 ms/frame).
+- Correctness: the byte-exact SharpProspero-fixture detile tests (single- and
+  multi-block) still pass, the linear `hle-video-out` guest regression still
+  presents (`Result=ORBIS_GEN2_OK`), and a spot check confirmed no framebuffer
+  corruption. Health: 0 unresolved imports, 0 dispatch errors, 0 dropped frames,
+  no `hasPixels=False`.
+- Managed suite: 970 passed, 0 failed.
+
 ## Current state / remaining work
 
-The target now renders its actual application frame: the game runs its frame loop,
-detiles and presents its CPU-drawn tiled scan-out buffer, and shows the real
-gradient/paddle/ball/score content at ~23 presented fps with zero unresolved
-imports and zero HLE dispatch errors.
+The target renders its actual application frame smoothly per presented frame
+(present thread keeps pace with the guest; no dropped frames). Frame rate is
+bounded by the guest's own CPU tile pass (~16-27 fps, variable), which is
+SharpProspero SDK code outside VirtualPS5's control; reaching 60 fps would require
+changing the game/SDK rendering (out of scope) or a fundamentally different
+scan-out architecture.
 
 Data imports: scanner still reports 3 unresolved-data candidates (Need_sceLibc,
 _Stderr, _Stdout); runtime shows no data-import faults and execution does not

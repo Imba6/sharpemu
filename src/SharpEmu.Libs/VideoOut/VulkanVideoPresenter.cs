@@ -14342,24 +14342,14 @@ internal static unsafe class VulkanVideoPresenter
                 return false;
             }
 
-            var fingerprint =
-                ComputeCpuDisplayFingerprint(
-                    state.Scratch);
-
-            if (state.HasUploadedFingerprint &&
-                state.UploadedFingerprint == fingerprint)
-            {
-                return false;
-            }
-
+            // A flip was submitted for this CPU scan-out buffer, which is sufficient
+            // evidence the contents changed: upload the freshly read frame directly.
+            // Hashing the whole frame every flip to guard the upload cost more than
+            // the upload it guarded (the app redraws every frame, so it never hit),
+            // so the full-frame fingerprint is not computed for this path.
             UploadGuestImageInitialData(
                 image,
                 state.Scratch);
-
-            state.UploadedFingerprint = fingerprint;
-            state.HasUploadedFingerprint = true;
-
-
 
             return true;
         }
