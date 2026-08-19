@@ -25,7 +25,7 @@ garbage a missing `strtoull` feeds into the runtime's numeric config parse.
 
 ### M1 — libc integer string conversions
 
-- Commit: (this milestone)
+- Commit: 47f6139
 - APIs: `strtol` (mXlxhmLNMPg), `strtoll` (VOBg+iNwB-4), `strtoul` (QxmSHBCuKTk),
   `strtoull` (5OqszGpy7Mg). One shared C-standard scanner in
   `src/SharpEmu.Libs/LibcStrtolExports.cs`.
@@ -39,9 +39,40 @@ garbage a missing `strtoull` feeds into the runtime's numeric config parse.
   bases 2..36, base-0 detection, 0x prefix, endptr semantics, signed/unsigned
   overflow clamps, negative wrap, invalid base, null/unmapped pointer safety).
 - Managed suite: 883 passed, 0 failed.
-- Next observed blocker: frames present black (`hasPixels=False
-  hasTranslatedDraw=False`); the game is in its loop but not yet drawing. Next
-  runtime-hit missing imports in loop order: `scePthreadCondattrSetclock`
-  (c-bxj027czs), `sceKernelGetCurrentCpu` (g0VTBxfJyu0), `pthread_sigmask`
-  (JZKw5+Wrnaw), `ceil` (gacfOmO8hNs), `time` (wLlFkwG9UcQ),
-  `srand48`/`lrand48` (+KSnjvZ0NMc / 5IpoNfxu84U).
+- Next observed blocker: the game submitted frame 0 then livelocked in
+  `WaitUntilOnScreen` (spinning `sceVideoOutGetFlipStatus` + `sceVideoOutWaitVblank`)
+  because the reported flip status never advanced its flipArg. Addressed in M2.
+
+### M2 — VideoOut flip status reports the submitted flip arg
+
+- Commit: (this milestone)
+- API: `sceVideoOutGetFlipStatus` (SbU3dwp80lQ) — existing export, corrected. Not
+  a new NID; a bookkeeping/layout bug fix in `VideoOutExports.cs`.
+- Before: `sceVideoOutGetFlipStatus` always wrote 0 into the struct's `flipArg`
+  field (offset 0x18) and wrote `currentBuffer` at the wrong offset (0x20 instead
+  of 0x38). SharpProspero's `DisplayDevice.Present` -> `WaitUntilOnScreen` spins
+  `while (flipStatus.flipArg < submittedFrame)`; with flipArg pinned at 0 the loop
+  never exits from the second frame onward. The game livelocked at ~0.5 submitted
+  fps, only the two initial buffers ever reaching present (both black).
+- After: `SubmitFlip` records the submitted `flipArg` on the port (flips retire
+  synchronously here, so the arg on screen is the last submitted), and
+  `GetFlipStatus` reports it at 0x18 with `currentBuffer` moved to 0x38. The game
+  now runs its real frame loop: `submitted_fps` ~16-17, both framebuffers
+  alternating in present every frame. No livelock, no early exit.
+- Scanner after: Gen5, imports 154, VPS5 7, SharpEmu 115, Missing 29, Data miss 3,
+  Blockers 0 (unchanged — bug fix, not a new import).
+- Regression: `tests/SharpEmu.Libs.Tests/VideoOut/VideoOutFlipStatusTests.cs`
+  (struct field offsets, invalid handle, null address). Behavioral proof:
+  target submitted_fps 0.5 -> 16.
+- Managed suite: 886 passed, 0 failed.
+- Next observed blocker: frames still present black — `vk.present_dropped ...
+  hasPixels=False version=0`. The game draws with the CPU (SharpProspero
+  `AgcTiler.Tile` into the tiled scan-out direct-memory buffer) and our Vulkan
+  present path does not pick up those CPU-written tiled scan-out buffers. This is
+  AGC/GPU-scanout architecture (surfacing a CPU-tiled direct-memory framebuffer to
+  the swapchain), which is out of scope for the unattended pass; recorded for a
+  supervised decision. Frame-loop execution itself is healthy.
+- Remaining low-risk runtime-hit imports (do not affect the black-frame issue):
+  `scePthreadCondattrSetclock` (c-bxj027czs), `sceKernelGetCurrentCpu`
+  (g0VTBxfJyu0), `pthread_sigmask` (JZKw5+Wrnaw), `ceil` (gacfOmO8hNs),
+  `time` (wLlFkwG9UcQ), `srand48`/`lrand48` (+KSnjvZ0NMc / 5IpoNfxu84U).

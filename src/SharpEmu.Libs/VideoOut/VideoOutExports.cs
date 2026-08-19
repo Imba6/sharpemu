@@ -205,6 +205,13 @@ public static class VideoOutExports
         public int FlipRate { get; set; }
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
+        // The flip argument submitted with the flip now on screen. Flips retire
+        // synchronously here (FlipCount bumps on submit, IsFlipPending is always 0),
+        // so the arg of the flip on screen is simply the last one submitted. Callers
+        // that pace on the output's own account of which flip is showing
+        // (SceVideoOutFlipStatus.flipArg, offset 0x18) spin until this reaches the
+        // frame they submitted; leaving it 0 livelocks them from the second frame on.
+        public long LastFlipArg { get; set; }
         public int CurrentBuffer { get; set; } = -1;
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
@@ -794,26 +801,37 @@ public static class VideoOutExports
         }
 
         ulong count;
+        long lastFlipArg;
         uint currentBuffer;
         lock (_stateGate)
         {
             count = port.FlipCount;
+            lastFlipArg = port.LastFlipArg;
             currentBuffer = unchecked((uint)port.CurrentBuffer);
         }
 
+        // SceVideoOutFlipStatus layout: count(0x00), processTime(0x08), tsc(0x10),
+        // flipArg(0x18), submitTsc(0x20), reserve(0x28), gcQueueNum:flipPendingNum
+        // (0x30, two uint32), currentBuffer(0x38, uint32).
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
+        // The arg of the flip now on screen. Callers that wait for a specific
+        // submitted frame to reach the screen (SharpProspero's Present ->
+        // WaitUntilOnScreen spins `while (flipArg < frame)`) livelock unless this
+        // advances; because flips retire synchronously here it is the last arg
+        // submitted.
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, unchecked((ulong)lastFlipArg));
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, 0);
         // Ghost of Yotei polls a flag past the classic 0x28-byte struct and
         // spins on sceKernelUsleep(1) while it's nonzero; the caller never
         // pre-zeroes that stack buffer, so an untouched field reads back as
         // garbage. Flips complete synchronously in this emulator (see
-        // SubmitFlip/sceVideoOutIsFlipPending, always not-pending), so the
-        // extended region must read zero here too.
+        // SubmitFlip/sceVideoOutIsFlipPending, always not-pending), so
+        // gcQueueNum/flipPendingNum must read zero here too.
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x30, 0);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x38, currentBuffer);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1267,6 +1285,7 @@ public static class VideoOutExports
 
         port.CurrentBuffer = bufferIndex;
         port.FlipCount++;
+        port.LastFlipArg = flipArg;
 
         eventHint =
             SceVideoOutInternalEventFlip |
