@@ -78,6 +78,15 @@ static int64_t s_flip_arg = 0;
 #define PAD_L1       0x0400u
 #define PAD_R1       0x0800u
 
+// Left-stick deadzone. scePadReadState reports each analog axis as 0..255 with
+// 128 at rest (0 = full up/left, 255 = full down/right). Treat a firm push past
+// the deadzone as the matching D-pad direction so a physical stick drives Doom
+// movement and menus. Generic translation only; scePad semantics are untouched.
+#define STICK_CENTER   128
+#define STICK_DEADZONE 48
+#define STICK_LOW      (STICK_CENTER - STICK_DEADZONE)
+#define STICK_HIGH     (STICK_CENTER + STICK_DEADZONE)
+
 typedef struct {
     uint32_t pad_bit;
     unsigned char doom_key;
@@ -132,6 +141,18 @@ static void poll_input(void)
 
     uint32_t buttons = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
                        ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+
+    // Fold the left analog stick into the D-pad direction bits before edge
+    // detection, so holding the stick behaves exactly like holding the D-pad:
+    // one key-down entering the zone, one key-up leaving it. data[4]=leftX,
+    // data[5]=leftY (see scePadReadState).
+    uint8_t stick_x = data[4];
+    uint8_t stick_y = data[5];
+    if (stick_x < STICK_LOW)  { buttons |= PAD_LEFT; }
+    else if (stick_x > STICK_HIGH) { buttons |= PAD_RIGHT; }
+    if (stick_y < STICK_LOW)  { buttons |= PAD_UP; }
+    else if (stick_y > STICK_HIGH) { buttons |= PAD_DOWN; }
+
     uint32_t changed = buttons ^ s_prev_buttons;
     if (changed != 0) {
         for (unsigned int i = 0; i < PAD_MAP_COUNT; i++) {
