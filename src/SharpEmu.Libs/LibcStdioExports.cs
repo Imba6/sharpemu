@@ -279,7 +279,11 @@ public static class LibcStdioExports
                     break;
                 }
 
-                if (!ctx.Memory.TryWrite(destination + totalRead, buffer.AsSpan(0, read)))
+                // Use the compat writer: fread targets caller-provided buffers,
+                // which for a libc malloc()/Z_Malloc() destination live in host heap
+                // memory outside the guest map. The compat path falls back to a
+                // direct host write there, exactly like the other stdio helpers.
+                if (!KernelMemoryCompatExports.TryWriteCompat(ctx, destination + totalRead, buffer.AsSpan(0, read)))
                 {
                     ctx[CpuRegister.Rax] = totalRead / elementSize;
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -355,7 +359,8 @@ public static class LibcStdioExports
             buffer.AsSpan(0, count).CopyTo(withNul);
             withNul[count] = 0;
 
-            if (!ctx.Memory.TryWrite(destination, withNul))
+            // Compat write: fgets targets caller buffers that may be libc heap.
+            if (!KernelMemoryCompatExports.TryWriteCompat(ctx, destination, withNul))
             {
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -521,7 +526,9 @@ public static class LibcStdioExports
             while (totalWritten < totalRequested)
             {
                 var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalWritten);
-                if (!ctx.Memory.TryRead(source + totalWritten, buffer.AsSpan(0, request)))
+                // Compat read: fwrite sources from caller buffers that may be libc
+                // heap (host memory outside the guest map).
+                if (!KernelMemoryCompatExports.TryReadCompat(ctx, source + totalWritten, buffer.AsSpan(0, request)))
                 {
                     ctx[CpuRegister.Rax] = totalWritten / elementSize;
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
