@@ -4541,13 +4541,14 @@ public static partial class KernelMemoryCompatExports
                             _ => unchecked((int)argumentSource.NextGpArg())
                         };
 
-                        var formatted = value.ToString(CultureInfo.InvariantCulture);
-                        if (showSign && value >= 0)
-                            formatted = "+" + formatted;
-                        else if (spaceForSign && value >= 0)
-                            formatted = " " + formatted;
+                        var magnitude = value < 0 ? unchecked((ulong)(-value)) : unchecked((ulong)value);
+                        var digits = ApplyIntPrecision(
+                            magnitude.ToString(CultureInfo.InvariantCulture), precision, value == 0);
+                        var sign = value < 0 ? "-" : showSign ? "+" : spaceForSign ? " " : "";
+                        var formatted = sign + digits;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        // C: when a precision is given, the '0' flag is ignored for integers.
+                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign && precision < 0));
                     }
                     break;
 
@@ -4561,8 +4562,9 @@ public static partial class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = value.ToString(CultureInfo.InvariantCulture);
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        var formatted = ApplyIntPrecision(
+                            value.ToString(CultureInfo.InvariantCulture), precision, value == 0);
+                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign && precision < 0));
                     }
                     break;
 
@@ -4577,14 +4579,18 @@ public static partial class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = specifier == 'x'
-                            ? value.ToString("x", CultureInfo.InvariantCulture)
-                            : value.ToString("X", CultureInfo.InvariantCulture);
+                        var hexDigits = ApplyIntPrecision(
+                            specifier == 'x'
+                                ? value.ToString("x", CultureInfo.InvariantCulture)
+                                : value.ToString("X", CultureInfo.InvariantCulture),
+                            precision,
+                            value == 0);
 
-                        if (alternateForm && value != 0)
-                            formatted = specifier == 'x' ? "0x" + formatted : "0X" + formatted;
+                        var formatted = alternateForm && value != 0
+                            ? (specifier == 'x' ? "0x" : "0X") + hexDigits
+                            : hexDigits;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign && precision < 0));
                     }
                     break;
 
@@ -4598,11 +4604,11 @@ public static partial class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = Convert.ToString((long)value, 8);
-                        if (alternateForm && value != 0)
+                        var formatted = ApplyIntPrecision(Convert.ToString((long)value, 8), precision, value == 0);
+                        if (alternateForm && (formatted.Length == 0 || formatted[0] != '0'))
                             formatted = "0" + formatted;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign && precision < 0));
                     }
                     break;
 
@@ -4725,6 +4731,18 @@ public static partial class KernelMemoryCompatExports
             return 0;
         }
         return value;
+    }
+
+    // C integer precision: the precision is the MINIMUM number of digits, zero-padded
+    // on the left (e.g. %.3d of 33 -> "033"). A precision of 0 with a zero value
+    // produces no digits at all. -1 means "no precision given".
+    private static string ApplyIntPrecision(string digits, int precision, bool valueIsZero)
+    {
+        if (precision < 0)
+            return digits;
+        if (precision == 0 && valueIsZero)
+            return string.Empty;
+        return digits.Length < precision ? new string('0', precision - digits.Length) + digits : digits;
     }
 
     private static string PadString(string str, int width, bool leftAlign, bool padWithZero)
