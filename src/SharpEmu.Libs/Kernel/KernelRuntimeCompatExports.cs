@@ -325,6 +325,26 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // The PS5 exposes eight logical CPU cores; sceKernelGetCurrentCpu returns the
+    // 0-based index of the core running the calling thread.
+    private const int Ps5LogicalCoreCount = 8;
+
+    [SysAbiExport(
+        Nid = "g0VTBxfJyu0",
+        ExportName = "sceKernelGetCurrentCpu",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetCurrentCpu(CpuContext ctx)
+    {
+        // Guest threads run on host threads, so there is no exact guest-core mapping;
+        // report the processor actually executing this thread, folded into the PS5
+        // core range so callers using it as a per-core index stay in bounds. This
+        // reflects the real executing core rather than a fixed value.
+        var core = (Thread.GetCurrentProcessorId() & int.MaxValue) % Ps5LogicalCoreCount;
+        ctx[CpuRegister.Rax] = unchecked((ulong)(uint)core);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "4J2sUJmuHZQ",
         ExportName = "sceKernelGetProcessTime",

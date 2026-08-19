@@ -24,8 +24,8 @@
   "summary": {
     "imports_total": 154,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 116,
-    "missing": 28,
+    "implemented_sharpemu": 117,
+    "missing": 27,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -1859,15 +1859,17 @@
       "library": "libKernel",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 20,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "g0VTBxfJyu0#B#C",
       "symbol_suffix": [
         "B",
         "C"
       ],
       "module_id": "B",
-      "library_id": "C"
+      "library_id": "C",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelRuntimeCompatExports.cs"
     },
     {
       "name": "malloc",

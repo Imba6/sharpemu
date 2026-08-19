@@ -85,7 +85,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M3 — pthread condattr clock
 
-- Commit: (this milestone)
+- Commit: 343b009
 - API: `scePthreadCondattrSetclock` (c-bxj027czs), libKernel.
 - Before: unresolved; called early and repeatedly (the game sets CLOCK_MONOTONIC
   on a condattr), returning NOT_FOUND each time.
@@ -100,3 +100,18 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
   (accepted/rejected clocks, null attr, store/destroy lifecycle, upsert).
 - Managed suite: 900 passed, 0 failed.
 - Next runtime-hit missing import: `sceKernelGetCurrentCpu` (g0VTBxfJyu0).
+
+### M4 — expose current cpu query
+
+- Commit: (this milestone)
+- API: `sceKernelGetCurrentCpu` (g0VTBxfJyu0), libKernel.
+- Before: unresolved; called during runtime scheduling/GC, returning NOT_FOUND.
+- After: resolved. Returns the processor actually executing the calling thread
+  (`Thread.GetCurrentProcessorId()`), folded into the PS5 8-core range so callers
+  using it as a per-core index stay in bounds. No more g0VTBxfJyu0 warnings; frame
+  loop unchanged (submitted_fps ~16).
+- Scanner after: SharpEmu 117, Missing 27, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Kernel/KernelGetCurrentCpuTests.cs`
+  (result always in [0,7] across many calls).
+- Managed suite: 901 passed, 0 failed.
+- Next runtime-hit missing import: `pthread_sigmask` (JZKw5+Wrnaw).
