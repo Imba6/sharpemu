@@ -270,7 +270,7 @@ regression, and its own commit.
 
 ### M14 — libc log
 
-- Commit: (this milestone)
+- Commit: dc489ae
 - API: `log` (rtV7-jWC6Yg), libc. Added to the scalar-double libm surface next to
   ceil.
 - Natural logarithm; Math.Log matches C log for the special cases: log(1)=0,
