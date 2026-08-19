@@ -46,7 +46,8 @@ Static scan: Gen5, imports 56, VPS5 7, SharpEmu 32, Missing 14, Blockers 0.
 
 ### M1 — reach title/menu and present a frame
 
-- Commit: (this milestone)
+- Commits: 4b63934 (target), 122d381 (strncasecmp/tolower/toupper),
+  e7d0cb2 (stdio libc-heap buffers), 5efd09b (printf integer precision)
 - Path to first frame required three HLE fixes (runtime-order driven), each with a
   focused managed regression:
   1. **strncasecmp / tolower / toupper** (NIDs pXvbDfchu6k / PqF+kHW-2WQ /
