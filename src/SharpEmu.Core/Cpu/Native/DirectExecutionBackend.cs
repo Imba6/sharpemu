@@ -346,6 +346,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _logGuestThreads;
 
+	// Env-gated (SHARPEMU_LOG_JOIN_STALL=1) diagnostic for pthread_join hangs: when a
+	// join polls past a threshold without the target reaching Exited/Faulted, dump the
+	// joined thread's full block state plus a snapshot of every guest thread so the
+	// stuck primitive/wake-key is captured. Default off; throttled while stalled.
+	private bool _logJoinStall;
+
 	private bool _logUsleep;
 
 	private bool _logFiber;
@@ -1171,6 +1177,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			!string.Equals(ignoreGuestInt41Env, "false", StringComparison.OrdinalIgnoreCase);
 		_ignoredGuestInt41Count = 0;
 		_logGuestThreads = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
+		_logJoinStall = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_JOIN_STALL"), "1", StringComparison.Ordinal);
 		_logUsleep = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
 		_logFiber = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER"), "1", StringComparison.Ordinal);
 		_logBootstrap = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_BOOTSTRAP"), "1", StringComparison.Ordinal);
@@ -3841,6 +3848,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// whole wait, so back off toward a 10ms cadence once the join is
 		// clearly long-lived.
 		var joinPollMilliseconds = 1;
+		// A permanent join (e.g. the primary thread joining the game's real main
+		// thread) is normal as long as the target keeps making forward progress.
+		// Only escalate to the stall dump once the target has made no HLE-import
+		// progress for a sustained window: that is the actual freeze signature
+		// (the target parked on a wait whose wake never arrives), not a busy
+		// long-running worker. Progress is measured by the target's import count.
+		var lastImportProgress = long.MinValue;
+		var lastProgressTimestamp = Stopwatch.GetTimestamp();
+		var nextJoinStallDumpTimestamp = long.MaxValue;
+		var joinStallDumpCount = 0;
 		while (!ActiveForcedGuestExit)
 		{
 			Thread? hostThread;
@@ -3867,6 +3884,33 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				}
 
 				hostThread = thread.HostThread;
+
+				if (_logJoinStall)
+				{
+					var now = Stopwatch.GetTimestamp();
+					var imports = Interlocked.Read(ref thread.ImportCount);
+					if (imports != lastImportProgress)
+					{
+						// Forward progress: not a freeze. Reset the stall window.
+						lastImportProgress = imports;
+						lastProgressTimestamp = now;
+						nextJoinStallDumpTimestamp = long.MaxValue;
+					}
+					else if (now - lastProgressTimestamp >= JoinStallFirstDumpTicks &&
+						(nextJoinStallDumpTimestamp == long.MaxValue || now >= nextJoinStallDumpTimestamp))
+					{
+						// Sustained no-progress stall — the freeze signature. Snapshot
+						// every guest thread on the first dump and periodically after, so
+						// the full wait graph is captured without flooding each poll.
+						DumpJoinStallDiagnostic(
+							threadHandle,
+							thread,
+							lastProgressTimestamp,
+							includeAllThreads: (joinStallDumpCount % 5) == 0);
+						joinStallDumpCount++;
+						nextJoinStallDumpTimestamp = now + JoinStallRepeatDumpTicks;
+					}
+				}
 			}
 
 			if (hostThread is not null &&
@@ -3887,6 +3931,57 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		error = "guest execution stopped while joining thread";
 		return false;
+	}
+
+	// Escalate ~3s after the joined target last made import progress, then repeat
+	// ~every 2s while it stays frozen.
+	private static readonly long JoinStallFirstDumpTicks = Stopwatch.Frequency * 3;
+	private static readonly long JoinStallRepeatDumpTicks = Stopwatch.Frequency * 2;
+
+	// Caller holds _guestThreadGate. Emits the joined thread's full block/scheduler
+	// state and (optionally) a one-line snapshot of every guest thread. This is the
+	// primary tool for diagnosing a pthread_join whose target has frozen: it shows
+	// whether the target is Blocked (on which wake key / with a resumable continuation
+	// or not), Ready but undispatched, or Running, plus what every other thread is
+	// waiting on — enough to distinguish a lost wakeup from a wait-graph cycle.
+	private void DumpJoinStallDiagnostic(
+		ulong threadHandle,
+		GuestThreadState target,
+		long lastProgressTimestamp,
+		bool includeAllThreads)
+	{
+		var frozenMs = (Stopwatch.GetTimestamp() - lastProgressTimestamp) * 1000.0 / Stopwatch.Frequency;
+		Console.Error.WriteLine(
+			$"[LOADER][JOIN-STALL] joiner=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+			$"target=0x{threadHandle:X16} name='{target.Name}' no_progress={frozenMs:F0}ms " +
+			$"state={target.State} executor={target.ExecutorActive} " +
+			$"hasContinuation={target.HasBlockedContinuation} " +
+			$"block={target.BlockReason ?? "none"} wake={target.BlockWakeKey ?? "none"} " +
+			$"deadline={target.BlockDeadlineTimestamp} " +
+			$"host_managed={target.HostThread?.ManagedThreadId ?? 0} " +
+			$"host_tid={Volatile.Read(ref target.HostThreadId)} " +
+			$"imports={Interlocked.Read(ref target.ImportCount)} " +
+			$"lastNid={Volatile.Read(ref target.LastImportNid) ?? "none"} " +
+			$"lastRet=0x{Volatile.Read(ref target.LastReturnRip):X16} " +
+			$"ready={Volatile.Read(ref _readyGuestThreadCount)}");
+		if (!includeAllThreads)
+		{
+			Console.Error.Flush();
+			return;
+		}
+		foreach (var thread in _guestThreads.Values)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][JOIN-STALL]   thread=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
+				$"state={thread.State} executor={thread.ExecutorActive} " +
+				$"hasContinuation={thread.HasBlockedContinuation} " +
+				$"block={thread.BlockReason ?? "none"} wake={thread.BlockWakeKey ?? "none"} " +
+				$"imports={Interlocked.Read(ref thread.ImportCount)} " +
+				$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} " +
+				$"ret=0x{Volatile.Read(ref thread.LastReturnRip):X16}");
+		}
+
+		Console.Error.Flush();
 	}
 
 	public void Pump(CpuContext callerContext, string reason)
