@@ -266,6 +266,31 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "wLlFkwG9UcQ",
+        ExportName = "time",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Time(CpuContext ctx)
+    {
+        // time_t time(time_t *tloc): return seconds since the Unix epoch and, when
+        // tloc is non-null, also store the value there. time_t is a 64-bit signed
+        // integer under the PS5 LP64 ABI.
+        var tlocAddress = ctx[CpuRegister.Rdi];
+        var seconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        if (tlocAddress != 0 && !ctx.TryWriteInt64(tlocAddress, seconds))
+        {
+            // A bad pointer would fault the caller on real hardware; report the
+            // error return instead of crashing the host.
+            ctx[CpuRegister.Rax] = unchecked((ulong)-1L);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)seconds);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "n88vx3C5nW8",
         ExportName = "gettimeofday",
         Target = Generation.Gen4 | Generation.Gen5,

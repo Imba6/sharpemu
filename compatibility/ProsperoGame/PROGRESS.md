@@ -152,7 +152,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M7 — libc drand48 family (srand48 + lrand48)
 
-- Commit: (this milestone)
+- Commit: c52268b
 - APIs: `srand48` (+KSnjvZ0NMc), `lrand48` (5IpoNfxu84U), libc. One shared 48-bit
   LCG state in `src/SharpEmu.Libs/LibcRand48Exports.cs`.
 - Before: both unresolved; the runtime seeds/draws RNG during init (srand48 x1,
@@ -166,3 +166,20 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
   seeding, reseed reproducibility, 31-bit range).
 - Managed suite: 924 passed, 0 failed.
 - Only remaining runtime-hit missing import: `time` (wLlFkwG9UcQ).
+
+### M8 — libc time
+
+- Commit: (this milestone)
+- API: `time` (wLlFkwG9UcQ), libc.
+- Before: unresolved; called once during init, returning NOT_FOUND.
+- After: resolved. Returns seconds since the Unix epoch (using the same wall clock
+  as gettimeofday) and stores it through tloc when non-null; a bad tloc returns
+  (time_t)-1 instead of faulting. All runtime-hit imports are now resolved: a
+  target run shows zero unresolved imports.
+- Scanner after: SharpEmu 122, Missing 22, Data miss 3, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Kernel/KernelTimeTests.cs` (null tloc,
+  tloc stores == return, bad pointer).
+- Managed suite: 927 passed, 0 failed.
+- Next observed blocker: the existing `fopen` HLE (xeYO4u7uyJ0) throws a host
+  ArgumentException during init because it receives an empty path string — a real
+  robustness bug flagged in the task. Investigating next.
