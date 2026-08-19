@@ -24,8 +24,8 @@
   "summary": {
     "imports_total": 154,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 118,
-    "missing": 26,
+    "implemented_sharpemu": 119,
+    "missing": 25,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -1897,15 +1897,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "gacfOmO8hNs#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibmExports.cs"
     },
     {
       "name": "scePadInit",

@@ -118,7 +118,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M5 — pthread_sigmask thread signal mask
 
-- Commit: (this milestone)
+- Commit: 7456ec6
 - API: `pthread_sigmask` (JZKw5+Wrnaw), libKernel.
 - Before: unresolved; called during runtime thread init, returning NOT_FOUND.
 - After: resolved. Maintains the calling thread's blocked-signal mask in
@@ -133,3 +133,19 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
   (round-trip, block/unblock bit ops, invalid how, null-set query, bad pointers).
 - Managed suite: 907 passed, 0 failed.
 - Next runtime-hit missing import: `ceil` (gacfOmO8hNs) — used in the frame loop.
+
+### M6 — libc ceil
+
+- Commit: (this milestone)
+- API: `ceil` (gacfOmO8hNs), libc.
+- Before: unresolved; called ~1078 times across the frame loop (FrameStats
+  overlay math), returning NOT_FOUND each time.
+- After: resolved via a scalar-double libm export (arg/result in XMM0, which the
+  import dispatcher captures). Math.Ceiling matches C ceil for NaN/+-inf/-0.0.
+  ceil now dispatches ORBIS_GEN2_OK; frame loop unchanged (submitted_fps ~16).
+- Scanner after: SharpEmu 119, Missing 25, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Libc/LibmExportsTests.cs` (values,
+  negative-zero sign, NaN, infinities).
+- Managed suite: 918 passed, 0 failed.
+- Remaining runtime-hit missing imports: `srand48`/`lrand48` (+KSnjvZ0NMc /
+  5IpoNfxu84U, RNG seeding), `time` (wLlFkwG9UcQ).
