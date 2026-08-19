@@ -11,4 +11,10 @@ internal static class RuntimeStubNids
 
     /// <summary>NID of the public <c>sceKernelDlsym</c> libKernel export.</summary>
     public const string SceKernelDlsym = "LwG8g3niqwA";
+
+    /// <summary>
+    /// Reserved import entry backing the guest raw-syscall gateway. Not a guest
+    /// symbol: it exists so the gateway reuses the import dispatch path.
+    /// </summary>
+    public const string RawSyscallGateway = "__internal_raw_syscall_gateway";
 }

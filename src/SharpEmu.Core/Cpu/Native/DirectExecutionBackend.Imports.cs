@@ -30,6 +30,12 @@ public sealed partial class DirectExecutionBackend
 	private const int ImportSavedMxcsrOffset = -152;
 	private const int ImportSavedFpuControlOffset = -148;
 	private const int ImportSavedXmmOffset = -128;
+
+	// Free 16-byte gap between the FPU control word and the XMM save area.  The
+	// raw-syscall trampoline variant reads bit 0 of this qword into CF just
+	// before returning to the guest, which is how a FreeBSD syscall reports
+	// failure.  Untouched by every other import.
+	private const int ImportSyscallCarryOffset = -144;
 	private const int ImportVectorRegisterCount = 8;
 	private const ulong StackCheckGuardValue = 0xC0DEC0DECAFEBA00UL;
 	private static long _canaryReturnRecoveries;
@@ -563,6 +569,10 @@ public sealed partial class DirectExecutionBackend
 				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.SceKernelDlsym, StringComparison.Ordinal))
 				{
 					orbisGen2Result = DispatchSceKernelDlsym();
+				}
+				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.RawSyscallGateway, StringComparison.Ordinal))
+				{
+					orbisGen2Result = DispatchRawSyscall(argPackPtr);
 				}
 				else if (string.Equals(importStubEntry.Nid, "r8mvOaWdi28", StringComparison.Ordinal))
 				{

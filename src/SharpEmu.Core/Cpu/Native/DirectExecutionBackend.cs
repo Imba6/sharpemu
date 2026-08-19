@@ -352,6 +352,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _logBootstrap;
 
+	private bool _logSyscalls;
+
 	private bool _logAllImports;
 
 	private bool _logImportPeriodic;
@@ -1172,6 +1174,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_logUsleep = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
 		_logFiber = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER"), "1", StringComparison.Ordinal);
 		_logBootstrap = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_BOOTSTRAP"), "1", StringComparison.Ordinal);
+		_logSyscalls = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SYSCALLS"), "1", StringComparison.Ordinal);
 		_logAllImports = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALL_IMPORTS"), "1", StringComparison.Ordinal);
 		// Periodic Import# spam (every 100k, early bands, NID samples) is on
 		// only when explicitly requested — default stderr traffic was a measurable tax.
@@ -2151,7 +2154,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
-	private unsafe nint CreateImportHandlerTrampoline(int importIndex)
+	/// <param name="rawSyscallCarry">
+	/// Emit the FreeBSD syscall carry-flag epilogue: CF is loaded from bit 0 of
+	/// the qword the managed dispatcher left at
+	/// <c>argPack + ImportSyscallCarryOffset</c>. Only the raw-syscall gateway
+	/// asks for this; ordinary imports return with undefined flags exactly as
+	/// before.
+	/// </param>
+	private unsafe nint CreateImportHandlerTrampoline(int importIndex, bool rawSyscallCarry = false)
 	{
 		void* ptr = VirtualAlloc(null, 512u, 12288u, 64u);
 		if (ptr == null)
@@ -2287,6 +2297,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				*(int*)(ptr2 + num) = -0x80 + (xmm * 0x10);
 				num += 4;
 			}
+			if (rawSyscallCarry)
+			{
+				// bt qword [r12 + ImportSyscallCarryOffset], 0
+				//
+				// Sets CF from the dispatcher's decision. It has to be the last
+				// flag-writing instruction before the guest sees RET, and the
+				// pops below leave flags alone, so this is the only slot that
+				// works. R12 still holds the arg-pack pointer here.
+				ptr2[num++] = 0x49;
+				ptr2[num++] = 0x0F;
+				ptr2[num++] = 0xBA;
+				ptr2[num++] = 0xA4;
+				ptr2[num++] = 0x24;
+				*(int*)(ptr2 + num) = ImportSyscallCarryOffset;
+				num += 4;
+				ptr2[num++] = 0x00;
+			}
 			ptr2[num++] = 76;
 			ptr2[num++] = 137;
 			ptr2[num++] = 228;
@@ -2351,9 +2378,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void ClearImportHandlerTrampolines()
 	{
-		// Dynamic dlsym thunks are backed by entries in this list, so their
-		// cached addresses die with it.
+		// Dynamic dlsym thunks and the raw-syscall gateway are backed by entries
+		// in this list, so their cached addresses die with it.
 		ClearDynamicHleThunks();
+		ResetRawSyscallState();
 		lock (_importHandlerTrampolineGate)
 		{
 			foreach (nint importHandlerTrampoline in _importHandlerTrampolines)

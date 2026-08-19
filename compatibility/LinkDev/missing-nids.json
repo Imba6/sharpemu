@@ -24,7 +24,7 @@
     "static_nids_resolved": 205,
     "imported_data_rebound": 0,
     "imported_data_unresolved": 5,
-    "stall_import_stub": "__internal_bootstrap_bridge"
+    "stall_import_stub": null
   },
   "summary": {
     "imports_total": 205,

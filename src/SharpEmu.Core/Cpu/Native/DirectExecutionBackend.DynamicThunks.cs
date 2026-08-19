@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -105,39 +106,119 @@ public sealed unsafe partial class DirectExecutionBackend
 				return address != 0;
 			}
 
-			var published = _importEntries;
-			var index = published.Length;
-			var grown = new ImportStubEntry[index + 1];
-			Array.Copy(published, grown, index);
-
-			// The trampoline bakes in its import index, so it must be created
-			// against the slot it will occupy. Nothing can reach it before the
-			// grown table is published: its address is not guest-visible yet.
-			var trampoline = CreateImportHandlerTrampoline(index);
-			var stub = trampoline == 0 ? 0 : AllocateDynamicHleThunkStub();
-			if (stub == 0 || !PatchImportStub(stub, trampoline))
+			if (!TryAppendImportEntry(export.Nid, export, rawSyscallCarry: false, out var trampoline))
 			{
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Dynamic HLE thunk allocation failed: {export.LibraryName}:{export.Name} ({export.Nid})");
 				return false;
 			}
 
-			address = (ulong)stub;
-			grown[index] = new ImportStubEntry(
-				address,
-				export.Nid,
-				export,
-				IsLeafImport(export.Nid),
-				IsNoBlockLeafImport(export.Nid),
-				ShouldSuppressStrlenTrace(export.Nid),
-				IsImportLoopGuardBoundary(export.Nid),
-				StableHash64(export.Nid));
-			Volatile.Write(ref _importEntries, grown);
+			// A libkernel syscall wrapper is offset by 0x0A by PS5 CRTs to reach
+			// the shared raw `syscall` entry, so those exports get the veneer
+			// that honours both offsets instead of a bare stub.
+			var isSyscallWrapper = GuestSyscallTable.TryGetByExportNid(export.Nid, out _);
+			if (isSyscallWrapper
+					? !TryCreateSyscallVeneer(trampoline, out address)
+					: !TryCreateDynamicHleThunkStub(trampoline, out address))
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][WARN] Dynamic HLE thunk allocation failed: {export.LibraryName}:{export.Name} ({export.Nid})");
+				return false;
+			}
+
+			PublishImportEntryAddress(export.Nid, address);
 			_dynamicHleThunksByNid[export.Nid] = address;
 			Console.Error.WriteLine(
-				$"[LOADER][INFO] Dynamic HLE thunk: {export.LibraryName}:{export.Name} ({export.Nid}) -> 0x{address:X16}");
+				$"[LOADER][INFO] Dynamic HLE thunk: {export.LibraryName}:{export.Name} ({export.Nid}) -> " +
+				$"0x{address:X16}{(isSyscallWrapper ? " (syscall veneer)" : string.Empty)}");
 			return true;
 		}
+	}
+
+	/// <summary>
+	/// Appends an import entry and builds its trampoline, growing the dispatch
+	/// table by publishing a copy so live guest threads always observe a whole
+	/// array. The caller supplies the guest-visible address afterwards through
+	/// <see cref="PublishImportEntryAddress"/>, because that address depends on
+	/// what the caller wraps the trampoline in.
+	/// </summary>
+	private bool TryAppendImportEntry(
+		string nid,
+		ExportedFunction? export,
+		bool rawSyscallCarry,
+		out nint trampoline)
+	{
+		var published = _importEntries;
+		var index = published.Length;
+		var grown = new ImportStubEntry[index + 1];
+		Array.Copy(published, grown, index);
+
+		// The trampoline bakes in its import index, so it must be created
+		// against the slot it will occupy. Nothing can reach it before the
+		// grown table is published: its address is not guest-visible yet.
+		trampoline = CreateImportHandlerTrampoline(index, rawSyscallCarry);
+		if (trampoline == 0)
+		{
+			return false;
+		}
+
+		grown[index] = new ImportStubEntry(
+			(ulong)trampoline,
+			nid,
+			export,
+			IsLeafImport(nid),
+			IsNoBlockLeafImport(nid),
+			ShouldSuppressStrlenTrace(nid),
+			IsImportLoopGuardBoundary(nid),
+			StableHash64(nid));
+		Volatile.Write(ref _importEntries, grown);
+		return true;
+	}
+
+	/// <summary>
+	/// Rewrites the entry's <see cref="ImportStubEntry.Address"/> to the address
+	/// the guest actually calls, which is what the stall reporter and the RIP
+	/// sampler match against.
+	///
+	/// Mutating an already-published element is safe here and only here: the
+	/// only way to reach this index is through a trampoline whose address has
+	/// not been handed to the guest yet, so the slot has no concurrent reader.
+	/// </summary>
+	private void PublishImportEntryAddress(string nid, ulong address)
+	{
+		var entries = _importEntries;
+		for (var index = entries.Length - 1; index >= 0; index--)
+		{
+			if (!string.Equals(entries[index].Nid, nid, StringComparison.Ordinal))
+			{
+				continue;
+			}
+
+			var entry = entries[index];
+			entries[index] = new ImportStubEntry(
+				address,
+				entry.Nid,
+				entry.Export,
+				entry.IsLeaf,
+				entry.IsNoBlockLeaf,
+				entry.SuppressStrlenTrace,
+				entry.IsLoopGuardBoundary,
+				entry.NidHash);
+			return;
+		}
+	}
+
+	private bool TryCreateDynamicHleThunkStub(nint trampoline, out ulong address)
+	{
+		address = 0;
+		var stub = AllocateDynamicHleThunkStub();
+		if (stub == 0 || !PatchImportStub(stub, trampoline))
+		{
+			return false;
+		}
+
+		address = (ulong)stub;
+		return true;
 	}
 
 	/// <summary>
