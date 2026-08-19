@@ -114,3 +114,102 @@ Static scan: Gen5, imports 56, VPS5 7, SharpEmu 32, Missing 14, Blockers 0.
 - Scanner: unchanged (imports 56, SharpEmu 35, Missing 11, Blockers 0) — no NID added.
 - Next blocker: verify real gameplay input transitions (KEYDOWN/KEYUP, held keys) —
   M2B.
+
+### M2B — verify gameplay input + analog stick
+
+- Date: 2026-08-19
+- Commit: d3c3d0a (map left analog stick to digital movement)
+- **Verification (no code change needed for the core model)**: the M1 edge-detected
+  queue computes `changed = buttons ^ prev` and enqueues a key **down** when a bit
+  becomes set and a key **up** when it clears, only on change. So a held D-pad/button
+  produces exactly one KEYDOWN (held in Doom's `gamekeydown[]`) and one KEYUP on
+  release — movement/fire do not stick and are not re-pressed every frame. The mapping
+  matches DoomGeneric's defaults (`m_controls.c`): `key_up/down/left/right` = arrows
+  (D-pad), `key_fire = KEY_FIRE` (Square), `key_use = KEY_USE` (Triangle),
+  `key_strafeleft/right` = L1/R1, menu = Enter/Escape (Cross, Circle/Options). The pad
+  button bits in the port match `PadExports` exactly.
+- **Change**: `scePadReadState` already reports the analog sticks (`data[4]=leftX`,
+  `data[5]=leftY`, 128 at rest) but the port ignored them. Folded the **left stick**
+  into the D-pad direction bits before edge detection, behind a deadzone, so a physical
+  stick drives movement/menus like the D-pad (one key-down entering the zone, one key-up
+  leaving it). Generic translation stays in `doomgeneric_ps5.c`; scePad semantics are
+  untouched.
+- Verified: eboot rebuilt (prospero-clang), boots to title/menu, stable 60 fps, no fatal
+  dispatch, no host crash. Managed suite unaffected.
+- Next blocker: runtime-hit libc/filesystem gaps (M2C).
+
+### M2C — runtime-hit libc gaps: console output + mkdir
+
+- Date: 2026-08-19
+- Commits: 5f1b417 (putc/putchar/puts), 890a663 (mkdir)
+- **Runtime-hit (not just static)**: a clean startup left four unresolved imports —
+  `putc` (~358x), `putchar` (~39x), `puts` (~15x) for Doom's banner/printf, and `mkdir`
+  (~2x) for the save/config dir.
+- **putc/putchar/puts** (NID tLB5+4TEOK0 / m5wN+SwZOR4 / YQ0navp+YIc): implemented on the
+  existing stdio infrastructure. `putc` shares `fputc`'s core (identical ABI) — a known
+  HLE FILE handle writes to the file, an unknown stream (the bundled libc's
+  stdout/stderr) forwards to the host console; `putchar` writes one byte to stdout;
+  `puts` writes the string + newline to stdout and returns a non-negative count. No data
+  dropped. (`KernelConsoleOutputTests`)
+- **mkdir** (NID JGMio+21L4c): implemented the libc POSIX face over the existing
+  `sceKernelMkdir` — guest path translated through the same mount table (no arbitrary
+  host path exposed), result mapped to the libc ABI (0 / -1+errno, existing → EEXIST
+  which POSIX callers treat as success), read-only mounts (e.g. `/app0`) stay denied.
+  `system` is deliberately **not** implemented (host-shell-execution boundary) and is
+  not runtime-hit. (`KernelMkdirPosixTests`)
+- After: with the four resolved, the run has **zero unresolved imports**. Doom's own
+  console output now reaches the host log, confirming full init:
+  `V_Init → W_Init (Freedoom Phase 1) → M_Init → P_Init → S_Init → HU_Init → ST_Init`.
+- Regressions added: 8 (`KernelConsoleOutputTests` ×4 incl. null-fault;
+  `KernelMkdirPosixTests` ×4: new / existing / null-ptr / unmapped-denied).
+- Managed suite: **1002 → 1010 passed**, 0 failed.
+- Scanner after: imports 56, VPS5 7, **SharpEmu 35 → 39**, **Missing 11 → 7**,
+  Blockers 0. Remaining misses are static-only (not runtime-hit): `atoi`, `atof`,
+  `sscanf`, `strdup`, `remove`, `system`, `__swbuf`, and data symbols `__stdoutp`,
+  `__stderrp`, `__isthreaded` — left unimplemented per the runtime-order rule.
+- Next: reach/observe E1M1 (M2D).
+
+### M2D — gameplay reachability (automated observation)
+
+- Date: 2026-08-19
+- No code change. With M2A–M2C in place the target: fully initializes through `ST_Init`,
+  detects Freedoom Phase 1, enters the game loop, and presents continuously at a stable
+  **60 fps** with **0 unresolved imports, 0 fatal HLE dispatch, 0 host crash** across
+  ~50s runs. Disk reads keep trickling after the title (13.3 MB → 14.15 MB over ~30s),
+  consistent with the attract loop cycling title/demo and loading level data (DEMO1 is
+  recorded E1M1 gameplay, which drives the 3D render/movement/fire path).
+- **Not human-validated**: this harness cannot inject controller input or see pixels, so
+  interactive New Game → E1M1 → move/turn/fire/open-door has NOT been visually confirmed.
+  See the manual checklist below. Per policy, "playable" is not claimed from continuous
+  presentation alone.
+- Next (optional, lowest priority): audio (M2E).
+
+## Manual validation checklist (human, with a display + controller/keyboard)
+
+Run: `make real-run ELF=real-tests/DoomGeneric/eboot.bin` (a redistributable
+`doom1.wad`/Freedoom must be at `real-tests/DoomGeneric/doom1.wad`). Controller or the
+keyboard fallback (arrows = move/turn & menu; Z or Enter = select/OK; X or Esc = back;
+C = fire; V = use/open; Q/E = strafe; left stick = move). Verify:
+
+1. Title/menu renders (Freedoom title, 640×400 scaled to the window).
+2. Esc/Options opens the menu; Up/Down move the highlight; Enter selects.
+3. New Game → Episode (if prompted) → Skill → level starts (E1M1 / Freedoom C1M1).
+4. Movement: forward/back (Up/Down), turn (Left/Right); motion is smooth, keys do not
+   stick when released, held direction keeps moving.
+5. Left analog stick moves/turns like the D-pad (deadzone feels reasonable).
+6. Fire (Square/C) fires the weapon repeatedly while held.
+7. Use (Triangle/V) opens a door / operates a switch.
+8. Strafe (L1/R1 or Q/E) side-steps.
+9. Esc returns to the menu; the game keeps presenting at ~60 fps throughout.
+10. No audio yet (expected — M2E not implemented).
+
+## Audio (M2E) — not started, assessment
+
+DoomGeneric routes SFX through a `sound_module_t` (`i_sound.c`); the SDL/Allegro backends
+are excluded from the PS5 build and no `DG_sound_module` is provided, so `I_InitSound`
+leaves the module NULL and sound is a safe no-op (S_Init prints but nothing plays). A
+clean integration would add a `DG_sound_module` in the port that mixes Doom's DS-lump SFX
+to PCM and submits to the existing VirtualPS5 `sceAudioOut` HLE — a self-contained
+software mixer in `doomgeneric_ps5.c` (~200–400 LOC) plus synthetic `sceAudioOut`
+regressions. Deferred: it is the lowest priority and interactive gameplay is not yet
+human-validated.

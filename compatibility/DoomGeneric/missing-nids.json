@@ -14,7 +14,7 @@
     ]
   },
   "runtime": {
-    "log": "/tmp/doomgeneric-run.log",
+    "log": "/tmp/doom-m2c.log",
     "static_nids_resolved": 56,
     "imported_data_rebound": 0,
     "imported_data_unresolved": 3,
@@ -24,8 +24,8 @@
   "summary": {
     "imports_total": 56,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 35,
-    "missing": 11,
+    "implemented_sharpemu": 39,
+    "missing": 7,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -266,11 +266,13 @@
     {
       "name": "mkdir",
       "nid": "JGMio+21L4c",
-      "library": "libSceLibcInternal",
+      "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
     },
     {
       "name": "printf",
@@ -286,29 +288,35 @@
     {
       "name": "putc",
       "nid": "tLB5+4TEOK0",
-      "library": "libSceLibcInternal",
+      "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
     },
     {
       "name": "putchar",
       "nid": "m5wN+SwZOR4",
-      "library": "libSceLibcInternal",
+      "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
     },
     {
       "name": "puts",
       "nid": "YQ0navp+YIc",
-      "library": "libSceLibcInternal",
+      "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
     },
     {
       "name": "realloc",
