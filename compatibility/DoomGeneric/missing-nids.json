@@ -7,6 +7,7 @@
     "needed_libraries": [
       "libScePad.sprx",
       "libSceVideoOut.sprx",
+      "libSceAudioOut.sprx",
       "libSceUserService.sprx",
       "libkernel.sprx",
       "libSceLibcInternal.sprx",
@@ -14,17 +15,17 @@
     ]
   },
   "runtime": {
-    "log": "/tmp/doom-m2c.log",
-    "static_nids_resolved": 56,
+    "log": "/tmp/doom-m3d.log",
+    "static_nids_resolved": 64,
     "imported_data_rebound": 0,
     "imported_data_unresolved": 3,
     "stall_import_stub": null,
     "stall_import_name": null
   },
   "summary": {
-    "imports_total": 56,
-    "implemented_virtualps5": 7,
-    "implemented_sharpemu": 39,
+    "imports_total": 64,
+    "implemented_virtualps5": 11,
+    "implemented_sharpemu": 43,
     "missing": 7,
     "unresolved_data": 3,
     "unknown_data": 0,
@@ -286,6 +287,50 @@
       "implementation_source": "src/SharpEmu.Libs/Kernel/KernelExports.cs"
     },
     {
+      "name": "pthread_create",
+      "nid": "OxhIB8LB-PQ",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelExports.cs"
+    },
+    {
+      "name": "pthread_join",
+      "nid": "h9CcP3J0oVM",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelExports.cs"
+    },
+    {
+      "name": "pthread_mutex_lock",
+      "nid": "7H0iTOciTLo",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelPthreadCompatExports.cs"
+    },
+    {
+      "name": "pthread_mutex_unlock",
+      "nid": "2Z+PpY6CaJg",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelPthreadCompatExports.cs"
+    },
+    {
       "name": "putc",
       "nid": "tLB5+4TEOK0",
       "library": "libc",
@@ -348,6 +393,46 @@
       "priority": 100,
       "provider": "sharpemu",
       "implementation_source": "src/SharpEmu.Libs/Kernel/KernelFileExtendedExports.cs"
+    },
+    {
+      "name": "sceAudioOutClose",
+      "nid": "s1--uE9mBFw",
+      "library": "libSceAudioOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceAudioOutInit",
+      "nid": "JfEPXVxhFqA",
+      "library": "libSceAudioOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceAudioOutOpen",
+      "nid": "ekNvsT22rsY",
+      "library": "libSceAudioOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceAudioOutOutput",
+      "nid": "QOQtbeDqsT4",
+      "library": "libSceAudioOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
     },
     {
       "name": "sceKernelGetProcessTime",

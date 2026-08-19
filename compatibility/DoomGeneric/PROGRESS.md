@@ -201,7 +201,10 @@ C = fire; V = use/open; Q/E = strafe; left stick = move). Verify:
 7. Use (Triangle/V) opens a door / operates a switch.
 8. Strafe (L1/R1 or Q/E) side-steps.
 9. Esc returns to the menu; the game keeps presenting at ~60 fps throughout.
-10. No audio yet (expected — M2E not implemented).
+10. AUDIO (M3B): menu move/select SFX; pistol/weapon fire; a door open/close; several
+    overlapping sounds at once — all audible, no crackling/stutter, no growing latency.
+11. PERSISTENCE (M3D): Save Game to a slot, quit the app, relaunch, Load Game — the save
+    is present and loads (savegames go to the writable /download0 sandbox mount).
 
 Manual validation 19-08-2026 21-58:
 - Doom/Freedoom boots correctly
@@ -211,13 +214,98 @@ Manual validation 19-08-2026 21-58:
 - rendering stable
 - stable 60 FPS during gameplay
 
-## Audio (M2E) — not started, assessment
+## M3 — playable game: audio, stability, persistence
 
-DoomGeneric routes SFX through a `sound_module_t` (`i_sound.c`); the SDL/Allegro backends
-are excluded from the PS5 build and no `DG_sound_module` is provided, so `I_InitSound`
-leaves the module NULL and sound is a safe no-op (S_Init prints but nothing plays). A
-clean integration would add a `DG_sound_module` in the port that mixes Doom's DS-lump SFX
-to PCM and submits to the existing VirtualPS5 `sceAudioOut` HLE — a self-contained
-software mixer in `doomgeneric_ps5.c` (~200–400 LOC) plus synthetic `sceAudioOut`
-regressions. Deferred: it is the lowest priority and interactive gameplay is not yet
-human-validated.
+### M3A — interactive gameplay (verified)
+
+- Date: 2026-08-19. No new code (input model verified; analog stick already added in M2B).
+- The M2B edge-detected model (`buttons ^ prev`, enqueue on change only) was
+  re-audited for all required transitions and is correct: key-down on press, key-up on
+  release, held keys stay held (no per-frame re-press), simultaneous buttons each edge
+  independently, analog stick crossing the deadzone raises the matching D-pad key-down
+  and returns-to-neutral raises key-up, and D-pad+stick OR into the same direction bit so
+  they never emit conflicting duplicate events.
+- **Human-validated 2026-08-19** (see checklist note above): boots, menu navigation,
+  gameplay input, no stuck controls, stable 60 fps.
+
+### M3B — audio (SFX through sceAudioOut)
+
+- Date: 2026-08-19
+- Commits: ab141b3 (port SFX backend), a62b41c (env-gated sceAudioOut submission profiler)
+- **Architecture** (as required): Doom mixer → guest PCM → `sceAudioOut*` → VirtualPS5
+  AudioOut HLE → host backend. No SDL/OpenAL/PortAudio; no direct host audio from the
+  guest; nothing bypasses sceAudioOut.
+- **Port backend** (`i_ps5sound.c`, new): provides `DG_sound_module`. Decodes each DMX
+  "DS" lump once to signed-16 mono (cached on `sfxinfo->driver_data`, no per-play alloc);
+  a dedicated guest audio thread (`pthread_create`) mixes the 16 channels (per-channel
+  16.16 fixed-point step resample to 48 kHz, Doom stereo separation/volume) into a static
+  interleaved S16 stereo buffer and submits it via `sceAudioOutOutput`, which blocks for
+  pacing (host-queue back-pressure) so the thread self-paces with no busy wait and never
+  stalls rendering. Music is a safe stub (Init returns false).
+- **Build**: `-DFEATURE_SOUND` makes `i_sound.c` pull in the module; its
+  `#include <SDL_mixer.h>` (i_sound.c calls no SDL itself) is satisfied by a stub header
+  in the port include dir; links `-lSceAudioOut`. No doomgeneric core changes.
+- **HLE**: no semantic change. Added an env-gated (`SHARPEMU_PROFILE_AUDIO=1`, default
+  off) submission profiler to `sceAudioOutOutput` (call count / silent count / frames /
+  peak amplitude, throttled 1/s) to prove the pipeline is live and non-silent.
+- **Verified**: port opens one AudioOut port (48 kHz S16 stereo, 256-frame grain,
+  backend=sdl3); the audio thread is scheduled and submits at exactly **187.5 grains/s
+  (48000/256)** — real-time cadence held for 160+ s with per-second deltas 187–188 (no
+  underrun/drift); after startup the attract demo produces continuous **non-silent** mixed
+  SFX (peak ~10k–20k of 32767). `hle-audio-out` guest regression still green; managed
+  suite **1010 passed**. SFX status: **working**. Music: **not implemented** (stub).
+  Audibility itself is a human step (the harness has no ears) — the profiler proves real
+  PCM is submitted.
+
+### M3C — long-run stability
+
+- Date: 2026-08-19. No code change (measurement).
+- Ran the target continuously for ~4 min (plus repeated multi-minute runs) with audio on:
+  - **present_dropped = 0, present_not_taken = 0**; FPS steady **59–61** (only the 1–2 s
+    startup ramp dips).
+  - Audio real-time cadence held the whole run (187–188 grains/s); no stall.
+  - Main emulator process: working set ramps 313 → 350 MB over the first ~2 min then
+    **plateaus** (349.9 → 350.0 MB flat), private memory plateaus ~280 MB; **handles
+    stable/decreasing** (742 → 716) and **threads stable** (42 → 35). Bounded growth to a
+    steady state — **no leak**, no handle/thread leak, no audio-queue growth.
+  - **0 fatal dispatch, 0 host crash, 0 OOM**; only bounded lifecycle warnings (8 stdio
+    host-fallback notices, capped).
+- Resource lifetime checked: SFX decode cache is bounded (decoded once per lump), fixed
+  16-channel array, static mix buffer, HLE submit uses a pooled buffer — no per-submission
+  allocation, no per-effect device.
+
+### M3D — save/config persistence
+
+- Date: 2026-08-19. Commit: 0c35b6e (redirect savegames to the writable sandbox mount)
+- Runtime-hit: Doom calls `mkdir("./.savegame")` and uses `.`/`GetDefaultConfigDir()`==
+  "." for its save dir; our runtime maps a relative path under the **read-only** `/app0`,
+  so the mkdir returned -1 and savegames could not be written.
+- Fix: point `savegamedir` at `/download0/` — the runtime's writable, per-title sandbox
+  mount (auto-created), set via the global after `doomgeneric_Create()`. Stays inside the
+  guest filesystem sandbox (no host absolute path exposed); no doomgeneric core change.
+  Config (`default.cfg`) is loaded during init and only rewritten at process exit (never
+  reached), so config does not round-trip; **savegames** now target a writable location.
+  `system()` remains intentionally unimplemented (host-shell boundary) and is not hit.
+- Interactive save/load is a human validation step (harness cannot inject input).
+
+### M3E — hot-path logging audit
+
+- Audited the per-frame / per-poll / per-submission / per-clock export paths for
+  unconditional logging. After the M2A time-log fix, the hot paths are clean:
+  `scePadReadState` (per-poll) and `sceAudioOutOutput` (per-submission) have no per-call
+  log; `sceVideoOutSubmitFlip`'s per-flip trace is `_dumpVideoOut`-gated; the compat
+  memory host-fallback notice is capped at 8. Both new diagnostics
+  (`SHARPEMU_PROFILE_STDIO`, `SHARPEMU_PROFILE_AUDIO`) are env-gated (default off) and
+  emit only throttled once-per-second summaries. No new hot-log offender found.
+
+### M3 scanner / performance
+
+- Scanner after M3: imports **64**, VPS5 **11**, **SharpEmu 43**, Missing **7**,
+  Data miss 3, Blockers 0; **0 runtime-unresolved imports**. The import/SharpEmu growth
+  vs M2 is the audio + pthread symbols now linked and resolved. Remaining 7 misses are
+  static-only and not runtime-hit (`atoi`, `atof`, `sscanf`, `strdup`, `remove`,
+  `system`, `__swbuf`) plus data symbols (`__stdoutp`, `__stderrp`, `__isthreaded`).
+- Performance held: emulator-internal startup ~4.6 s (unchanged); steady state 60 fps,
+  present_dropped=0; audio submission cadence 187.5 grains/s.
+- Remaining: music (deferred — needs MIDI/OPL, a large subsystem); interactive
+  audio/save validation is a human step.
