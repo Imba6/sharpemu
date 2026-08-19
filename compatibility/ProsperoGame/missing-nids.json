@@ -24,8 +24,8 @@
   "summary": {
     "imports_total": 154,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 123,
-    "missing": 21,
+    "implemented_sharpemu": 124,
+    "missing": 20,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -337,15 +337,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "6XG4B33N09g#C#C",
       "symbol_suffix": [
         "C",
         "C"
       ],
       "module_id": "C",
-      "library_id": "C"
+      "library_id": "C",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelPthreadCompatExports.cs"
     },
     {
       "name": "scePadClose",

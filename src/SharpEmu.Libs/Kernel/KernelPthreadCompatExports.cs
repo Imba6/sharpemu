@@ -277,6 +277,21 @@ public static class KernelPthreadCompatExports
     }
 
     [SysAbiExport(
+        Nid = "6XG4B33N09g",
+        ExportName = "sched_yield",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int SchedYield(CpuContext ctx)
+    {
+        // POSIX sched_yield relinquishes the processor to another runnable thread
+        // and returns 0 on success. Thread.Yield offers the host scheduler the same
+        // hint; it never fails for our purposes.
+        Thread.Yield();
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "B5GmVDKwpn0",
         ExportName = "pthread_yield",
         Target = Generation.Gen4 | Generation.Gen5,

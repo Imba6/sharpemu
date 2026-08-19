@@ -220,13 +220,23 @@ regression, and its own commit.
 
 ### M10 — libc bcmp
 
-- Commit: (this milestone)
+- Commit: a366112
 - API: `bcmp` (5TjaJwkLWxE), libc.
 - Byte comparison returning 0 when equal, nonzero otherwise (mirrors the existing
   Memcmp; validates guest pointers, MEMORY_FAULT on a bad address).
 - Not runtime-hit; resolved statically. Scanner SharpEmu 122->123, Missing 22->21.
 - Regression: `tests/SharpEmu.Libs.Tests/Kernel/KernelBcmpTests.cs`.
 - Managed suite: 935 passed, 0 failed.
+
+### M11 — libc sched_yield
+
+- Commit: (this milestone)
+- API: `sched_yield` (6XG4B33N09g), libc.
+- Yields the processor via Thread.Yield (same as the existing scePthreadYield) and
+  returns 0. Not runtime-hit; resolved statically. Scanner SharpEmu 123->124,
+  Missing 21->20.
+- Regression: `tests/SharpEmu.Libs.Tests/Pthread/SchedYieldTests.cs`.
+- Managed suite: 936 passed, 0 failed.
 
 ## Current state / remaining work
 
