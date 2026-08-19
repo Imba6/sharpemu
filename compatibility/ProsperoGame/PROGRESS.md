@@ -240,7 +240,7 @@ regression, and its own commit.
 
 ### M12 — libc strerror + strerror_r
 
-- Commit: (this milestone)
+- Commit: 720f626
 - APIs: `strerror` (RIa6GnWp+iU), `strerror_r` (RBcs3uut1TA), libc. Shared FreeBSD
   sys_errlist message table in `src/SharpEmu.Libs/LibcStrerrorExports.cs`.
 - strerror returns a pointer to guest-resident static storage per distinct message
@@ -252,6 +252,21 @@ regression, and its own commit.
   (message table known/unknown, strerror_r return codes and truncation, strerror
   pointer reuse where the harness backs allocation).
 - Managed suite: 949 passed, 0 failed.
+
+### M13 — libc strtok_r
+
+- Commit: (this milestone)
+- API: `strtok_r` (enqPGLfmVNU), libc.
+- Reentrant tokenizer that splits a guest string in place on any delimiter
+  character, resuming from the caller's saveptr; skips leading/repeated
+  delimiters, null-terminates each token in guest memory, and bounds its scan
+  against an unterminated string. Guest-pointer safe (returns NULL on a null
+  saveptr, unreadable delim, or a write it cannot make).
+- Not runtime-hit; resolved statically. Scanner SharpEmu 126->127, Missing 18->17.
+- Regression: `tests/SharpEmu.Libs.Tests/Libc/LibcStrtokRTests.cs` (single/multi
+  delimiter, leading/trailing/repeated delimiters, empty and all-delimiter input,
+  no-delimiter single token, null saveptr).
+- Managed suite: 957 passed, 0 failed.
 
 ## Current state / remaining work
 
