@@ -61,6 +61,7 @@ public static class GuestSyscallTable
     [
         new(4, "write", "FN4gaPmuFV8", 3, GuestSyscallResultConvention.PosixErrno),
         new(20, "getpid", "HoLVWNanBBc", 0, GuestSyscallResultConvention.Infallible),
+        new(202, "__sysctl", "SSYvJ0oHilM", 6, GuestSyscallResultConvention.PosixErrno),
     ];
 
     private static readonly Dictionary<int, GuestSyscallDescriptor> ByNumber = BuildByNumber();

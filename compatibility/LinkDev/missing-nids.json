@@ -29,8 +29,8 @@
   "summary": {
     "imports_total": 205,
     "implemented_virtualps5": 9,
-    "implemented_sharpemu": 103,
-    "missing": 88,
+    "implemented_sharpemu": 104,
+    "missing": 87,
     "unresolved_data": 5,
     "unknown_data": 0,
     "blocking": 0
@@ -1941,8 +1941,10 @@
       "library": "libSceLibcInternal",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelSysctlCompatExports.cs"
     },
     {
       "name": "sysctlbyname",
