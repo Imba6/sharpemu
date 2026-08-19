@@ -286,7 +286,7 @@ sched_yield, time, strerror/strerror_r, strtok_r, srand48/lrand48, ceil, log).
 
 ### M15 — present tiled CPU framebuffers (visible frame)
 
-- Commit: (this milestone)
+- Commit: 35c063c
 - Area: VideoOut CPU scan-out. New `src/SharpEmu.Libs/VideoOut/VideoOutScanoutDetile.cs`;
   wired into `VulkanVideoPresenter` bootstrap + per-frame refresh of CPU display buffers.
 - Before: the game reached its frame loop but every frame presented black
