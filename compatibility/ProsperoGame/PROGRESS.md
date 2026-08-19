@@ -103,7 +103,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M4 — expose current cpu query
 
-- Commit: (this milestone)
+- Commit: 6248481
 - API: `sceKernelGetCurrentCpu` (g0VTBxfJyu0), libKernel.
 - Before: unresolved; called during runtime scheduling/GC, returning NOT_FOUND.
 - After: resolved. Returns the processor actually executing the calling thread
@@ -115,3 +115,21 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
   (result always in [0,7] across many calls).
 - Managed suite: 901 passed, 0 failed.
 - Next runtime-hit missing import: `pthread_sigmask` (JZKw5+Wrnaw).
+
+### M5 — pthread_sigmask thread signal mask
+
+- Commit: (this milestone)
+- API: `pthread_sigmask` (JZKw5+Wrnaw), libKernel.
+- Before: unresolved; called during runtime thread init, returning NOT_FOUND.
+- After: resolved. Maintains the calling thread's blocked-signal mask in
+  [ThreadStatic] storage (FreeBSD sigset_t, 16 bytes), honouring
+  SIG_BLOCK/UNBLOCK/SETMASK, round-tripping the previous mask through oldset, and
+  returning EINVAL (bad how) / EFAULT (bad pointer) as the POSIX return value. We
+  do not deliver async POSIX signals to guest threads, so the mask has no delivery
+  effect, but the save/restore round-trip callers rely on is correct. No more
+  JZKw5+Wrnaw warnings; frame loop unchanged (submitted_fps ~16).
+- Scanner after: SharpEmu 118, Missing 26, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Pthread/PthreadSigmaskTests.cs`
+  (round-trip, block/unblock bit ops, invalid how, null-set query, bad pointers).
+- Managed suite: 907 passed, 0 failed.
+- Next runtime-hit missing import: `ceil` (gacfOmO8hNs) — used in the frame loop.

@@ -657,6 +657,87 @@ public static class KernelPthreadCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // FreeBSD sigprocmask/pthread_sigmask "how" values (sys/signal.h) and errno subset.
+    private const int SigBlock = 1;
+    private const int SigUnblock = 2;
+    private const int SigSetmask = 3;
+    private const int Efault = 14;
+    private const int Einval = 22;
+
+    // The calling thread's blocked-signal mask (FreeBSD sigset_t is 4x uint32 = 16 bytes,
+    // held here as two 64-bit halves). Each guest thread runs on its own host thread, so
+    // [ThreadStatic] gives correct per-thread storage; the default 0 is the empty mask a
+    // thread starts with. We do not deliver asynchronous POSIX signals to guest threads,
+    // so the mask has no delivery effect, but pthread_sigmask must still round-trip it
+    // through oldset for callers that save and restore their mask.
+    [ThreadStatic] private static ulong _threadSignalMask0;
+    [ThreadStatic] private static ulong _threadSignalMask1;
+
+    [SysAbiExport(
+        Nid = "JZKw5+Wrnaw",
+        ExportName = "pthread_sigmask",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadSigmask(CpuContext ctx)
+    {
+        var how = unchecked((int)ctx[CpuRegister.Rdi]);
+        var setAddress = ctx[CpuRegister.Rsi];
+        var oldSetAddress = ctx[CpuRegister.Rdx];
+
+        // Validate "how" before touching anything when a new mask is supplied; a null
+        // set means the call only queries the current mask and "how" is ignored.
+        if (setAddress != 0 && how is not (SigBlock or SigUnblock or SigSetmask))
+        {
+            return SetSigmaskReturn(ctx, Einval);
+        }
+
+        var current0 = _threadSignalMask0;
+        var current1 = _threadSignalMask1;
+
+        // oldset receives the mask in effect before the change.
+        if (oldSetAddress != 0 &&
+            (!ctx.TryWriteUInt64(oldSetAddress, current0) ||
+             !ctx.TryWriteUInt64(oldSetAddress + sizeof(ulong), current1)))
+        {
+            return SetSigmaskReturn(ctx, Efault);
+        }
+
+        if (setAddress != 0)
+        {
+            if (!ctx.TryReadUInt64(setAddress, out var set0) ||
+                !ctx.TryReadUInt64(setAddress + sizeof(ulong), out var set1))
+            {
+                return SetSigmaskReturn(ctx, Efault);
+            }
+
+            switch (how)
+            {
+                case SigBlock:
+                    _threadSignalMask0 = current0 | set0;
+                    _threadSignalMask1 = current1 | set1;
+                    break;
+                case SigUnblock:
+                    _threadSignalMask0 = current0 & ~set0;
+                    _threadSignalMask1 = current1 & ~set1;
+                    break;
+                default: // SigSetmask
+                    _threadSignalMask0 = set0;
+                    _threadSignalMask1 = set1;
+                    break;
+            }
+        }
+
+        return SetSigmaskReturn(ctx, 0);
+    }
+
+    // pthread_sigmask reports its outcome as the return value (0 or a positive errno),
+    // not through the errno slot.
+    private static int SetSigmaskReturn(CpuContext ctx, int errorCode)
+    {
+        ctx[CpuRegister.Rax] = unchecked((ulong)(uint)errorCode);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     // FreeBSD pthread_condattr_setclock accepts these clock ids (sys/_clock_id.h).
     private const int ClockRealtime = 0;
     private const int ClockVirtual = 1;
