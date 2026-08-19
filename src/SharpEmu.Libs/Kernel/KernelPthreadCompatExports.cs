@@ -29,7 +29,10 @@ public static class KernelPthreadCompatExports
     private static readonly Dictionary<ulong, PthreadMutexAttrState> _mutexAttrStates = new();
     private static readonly Dictionary<ulong, PthreadCondState> _condStates = new();
     private static readonly Dictionary<ulong, object> _onceGates = new();
-    private static readonly HashSet<ulong> _condAttrStates = new();
+    // Condition-variable attribute objects, mapped to the clock the caller selected
+    // for them (CLOCK_REALTIME by default). scePthreadCondattrSetclock records the
+    // clock here; see the export for how far it is honoured.
+    private static readonly Dictionary<ulong, int> _condAttrStates = new();
     private static readonly bool _tracePthreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
     private static readonly bool _tracePthreadConds =
@@ -598,7 +601,36 @@ public static class KernelPthreadCompatExports
 
         lock (_stateGate)
         {
-            _condAttrStates.Add(attrAddress);
+            _condAttrStates[attrAddress] = ClockRealtime;
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "c-bxj027czs",
+        ExportName = "scePthreadCondattrSetclock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadCondattrSetclock(CpuContext ctx)
+    {
+        var attrAddress = ctx[CpuRegister.Rdi];
+        var clockId = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (attrAddress == 0 || !IsCondattrClockSupported(clockId))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // Record the selected clock on the attribute. Condition waits in this
+        // environment are bounded relative waits (see PthreadCondWaitCore), and the
+        // absolute-deadline path resolves timeouts against the wall clock regardless
+        // of the attribute clock, so the recorded value is not yet consumed by the
+        // wait path; storing it keeps the attribute state truthful and matches the
+        // FreeBSD contract of writing c_clockid. setclock writes the field whether or
+        // not init was tracked, so upsert rather than requiring a prior init.
+        lock (_stateGate)
+        {
+            _condAttrStates[attrAddress] = clockId;
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -624,6 +656,17 @@ public static class KernelPthreadCompatExports
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // FreeBSD pthread_condattr_setclock accepts these clock ids (sys/_clock_id.h).
+    private const int ClockRealtime = 0;
+    private const int ClockVirtual = 1;
+    private const int ClockProf = 2;
+    private const int ClockMonotonic = 4;
+    private const int ClockUptime = 5;
+    private const int ClockSecond = 13;
+
+    private static bool IsCondattrClockSupported(int clockId) => clockId is
+        ClockRealtime or ClockVirtual or ClockProf or ClockMonotonic or ClockUptime or ClockSecond;
 
     [SysAbiExport(
         Nid = "14bOACANTBo",

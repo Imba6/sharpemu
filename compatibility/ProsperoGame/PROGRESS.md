@@ -45,7 +45,7 @@ garbage a missing `strtoull` feeds into the runtime's numeric config parse.
 
 ### M2 — VideoOut flip status reports the submitted flip arg
 
-- Commit: (this milestone)
+- Commit: 6f7dcf6
 - API: `sceVideoOutGetFlipStatus` (SbU3dwp80lQ) — existing export, corrected. Not
   a new NID; a bookkeeping/layout bug fix in `VideoOutExports.cs`.
 - Before: `sceVideoOutGetFlipStatus` always wrote 0 into the struct's `flipArg`
@@ -76,3 +76,27 @@ garbage a missing `strtoull` feeds into the runtime's numeric config parse.
   `scePthreadCondattrSetclock` (c-bxj027czs), `sceKernelGetCurrentCpu`
   (g0VTBxfJyu0), `pthread_sigmask` (JZKw5+Wrnaw), `ceil` (gacfOmO8hNs),
   `time` (wLlFkwG9UcQ), `srand48`/`lrand48` (+KSnjvZ0NMc / 5IpoNfxu84U).
+
+## Backlog (frame loop healthy; black-frame issue is architecture-gated)
+
+The game now reaches and runs its frame loop; the remaining visible-output gap
+(CPU-tiled scan-out -> Vulkan swapchain) is AGC/GPU-scanout architecture and is
+left for a supervised decision. Continuing with low-risk runtime-hit imports.
+
+### M3 — pthread condattr clock
+
+- Commit: (this milestone)
+- API: `scePthreadCondattrSetclock` (c-bxj027czs), libKernel.
+- Before: unresolved; called early and repeatedly (the game sets CLOCK_MONOTONIC
+  on a condattr), returning NOT_FOUND each time.
+- After: resolved. Records the selected clock on the attribute (converting the
+  condattr tracking set to a clock map), validating against the FreeBSD accepted
+  clock set and rejecting others / null attr with EINVAL. No more c-bxj027czs
+  warnings; frame loop unchanged (submitted_fps ~16). The game uses untimed
+  pthread_cond_wait, so the recorded clock is not yet consumed by the bounded-wait
+  timed path (documented in the export).
+- Scanner after: SharpEmu 116, Missing 28, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Pthread/PthreadCondattrClockTests.cs`
+  (accepted/rejected clocks, null attr, store/destroy lifecycle, upsert).
+- Managed suite: 900 passed, 0 failed.
+- Next runtime-hit missing import: `sceKernelGetCurrentCpu` (g0VTBxfJyu0).
