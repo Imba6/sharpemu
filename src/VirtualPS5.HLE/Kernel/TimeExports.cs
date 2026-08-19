@@ -9,6 +9,20 @@ public static class TimeExports
     private static readonly long ProcessStartTimestamp =
         Stopwatch.GetTimestamp();
 
+    // These libKernel time helpers are the guest's clock-polling primitives:
+    // Doom's I_GetTime and its tic busy-loop call sceKernelGetProcessTime tens
+    // of times per frame, and sceKernelUsleep once per frame. An unconditional
+    // Console.Error.WriteLine per call serialized guest execution on host
+    // console I/O — the dominant startup cost (tens of seconds to the first
+    // frame) and exactly the per-poll spam AGENTS.md forbids. Gate the trace
+    // behind an opt-in env flag so it stays available for debugging without
+    // taxing every poll. One-shot calls (frequency query) may still log.
+    private static readonly bool _traceKernelTime =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_KERNEL_TIME"),
+            "1",
+            StringComparison.Ordinal);
+
     [SysAbiExport(
         Nid = "4J2sUJmuHZQ",
         ExportName = "sceKernelGetProcessTime",
@@ -25,8 +39,11 @@ public static class TimeExports
         ctx[CpuRegister.Rax] =
             unchecked((ulong)Math.Max(0, microseconds));
 
-        Console.Error.WriteLine(
-            $"[VPS5][KERNEL] sceKernelGetProcessTime -> {microseconds}");
+        if (_traceKernelTime)
+        {
+            Console.Error.WriteLine(
+                $"[VPS5][KERNEL] sceKernelGetProcessTime -> {microseconds}");
+        }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -44,8 +61,11 @@ public static class TimeExports
         ctx[CpuRegister.Rax] =
             unchecked((ulong)Math.Max(0, elapsedTicks));
 
-        Console.Error.WriteLine(
-            $"[VPS5][KERNEL] sceKernelGetProcessTimeCounter -> {elapsedTicks}");
+        if (_traceKernelTime)
+        {
+            Console.Error.WriteLine(
+                $"[VPS5][KERNEL] sceKernelGetProcessTimeCounter -> {elapsedTicks}");
+        }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -122,9 +142,12 @@ public static class TimeExports
                 OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        Console.Error.WriteLine(
-            $"[VPS5][KERNEL] sceKernelClockGettime clock={clockId} " +
-            $"-> {seconds}s {nanoseconds}ns");
+        if (_traceKernelTime)
+        {
+            Console.Error.WriteLine(
+                $"[VPS5][KERNEL] sceKernelClockGettime clock={clockId} " +
+                $"-> {seconds}s {nanoseconds}ns");
+        }
 
         return ctx.SetReturn(
             OrbisGen2Result.ORBIS_GEN2_OK);
@@ -164,9 +187,12 @@ public static class TimeExports
                 OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        Console.Error.WriteLine(
-            $"[VPS5][KERNEL] sceKernelGettimeofday " +
-            $"-> {seconds}s {microseconds}us");
+        if (_traceKernelTime)
+        {
+            Console.Error.WriteLine(
+                $"[VPS5][KERNEL] sceKernelGettimeofday " +
+                $"-> {seconds}s {microseconds}us");
+        }
 
         return ctx.SetReturn(
             OrbisGen2Result.ORBIS_GEN2_OK);
@@ -182,8 +208,11 @@ public static class TimeExports
         var microseconds =
             ctx[CpuRegister.Rdi];
 
-        Console.Error.WriteLine(
-            $"[VPS5][KERNEL] sceKernelUsleep({microseconds})");
+        if (_traceKernelTime)
+        {
+            Console.Error.WriteLine(
+                $"[VPS5][KERNEL] sceKernelUsleep({microseconds})");
+        }
 
         SleepMicroseconds(microseconds);
 
