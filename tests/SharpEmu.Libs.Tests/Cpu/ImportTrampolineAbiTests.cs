@@ -69,12 +69,20 @@ public sealed class ImportTrampolineAbiTests
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(trampolineList);
         trampolineList.SetValue(backend, new List<nint>());
+        // The trampoline list is guarded by a lock; GetUninitializedObject skips
+        // the inline field initializer, so seed the gate the production code locks.
+        var trampolineGate = typeof(DirectExecutionBackend).GetField(
+            "_importHandlerTrampolineGate",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(trampolineGate);
+        trampolineGate.SetValue(backend, new object());
 
         var createTrampoline = typeof(DirectExecutionBackend).GetMethod(
             "CreateImportHandlerTrampoline",
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(createTrampoline);
-        var trampoline = (nint)createTrampoline.Invoke(backend, [0])!;
+        // (importIndex, rawSyscallCarry) — reflection does not apply C# defaults.
+        var trampoline = (nint)createTrampoline.Invoke(backend, [0, false])!;
         Assert.NotEqual(0, trampoline);
 
         try

@@ -289,6 +289,7 @@ public sealed class SelfLoader : ISelfLoader
             out var preInitializerFunctions,
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
+        var sdkPs5Version = ResolveProcParamSdkPs5Version(virtualMemory, procParamAddress);
 
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");
@@ -331,7 +332,8 @@ public sealed class SelfLoader : ISelfLoader
             applicationInfo.Version,
             tlsModuleId,
             tlsInfo.MemorySize,
-            tlsInfo.StaticOffset);
+            tlsInfo.StaticOffset,
+            sdkPs5Version);
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
@@ -509,6 +511,52 @@ public sealed class SelfLoader : ISelfLoader
                 fileData,
                 header.Flags);
         }
+    }
+
+    // SceProcParam layout (ps5-payload-dev/sdk crt/kernel.c):
+    //   0x00 u64 structsize
+    //   0x08 u32 magic
+    //   0x0C u32 ent_count
+    //   0x10 u32 sdk_ps4_ver
+    //   0x14 u32 sdk_ps5_ver
+    private const ulong ProcParamSdkPs5VersionOffset = 0x14;
+    private const ulong ProcParamMinSizeForSdkPs5Version = ProcParamSdkPs5VersionOffset + sizeof(uint);
+
+    private static uint? ResolveProcParamSdkPs5Version(IVirtualMemory virtualMemory, ulong procParamAddress)
+    {
+        if (procParamAddress == 0)
+        {
+            return null;
+        }
+
+        // Reject a truncated/foreign structure before trusting the field offset;
+        // the size field must at least reach past sdk_ps5_ver.
+        Span<byte> sizeBytes = stackalloc byte[sizeof(ulong)];
+        if (!virtualMemory.TryRead(procParamAddress, sizeBytes))
+        {
+            return null;
+        }
+
+        var structSize = BinaryPrimitives.ReadUInt64LittleEndian(sizeBytes);
+        if (structSize < ProcParamMinSizeForSdkPs5Version)
+        {
+            return null;
+        }
+
+        Span<byte> versionBytes = stackalloc byte[sizeof(uint)];
+        if (!virtualMemory.TryRead(procParamAddress + ProcParamSdkPs5VersionOffset, versionBytes))
+        {
+            return null;
+        }
+
+        var sdkPs5Version = BinaryPrimitives.ReadUInt32LittleEndian(versionBytes);
+        if (sdkPs5Version == 0)
+        {
+            return null;
+        }
+
+        Console.WriteLine($"[LOADER] SceProcParam sdk_ps5_ver: 0x{sdkPs5Version:X8}");
+        return sdkPs5Version;
     }
 
     private static ulong ResolveProcParamAddress(IReadOnlyList<ProgramHeader> programHeaders, ulong imageBase)

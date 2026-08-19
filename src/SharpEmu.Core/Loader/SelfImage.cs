@@ -27,7 +27,8 @@ public sealed class SelfImage
         string? version = null,
         uint tlsModuleId = 0,
         ulong tlsMemorySize = 0,
-        ulong tlsStaticOffset = 0)
+        ulong tlsStaticOffset = 0,
+        uint? sdkPs5Version = null)
     {
         ArgumentNullException.ThrowIfNull(programHeaders);
         ArgumentNullException.ThrowIfNull(mappedRegions);
@@ -50,6 +51,7 @@ public sealed class SelfImage
         TlsModuleId = tlsModuleId;
         TlsMemorySize = tlsMemorySize;
         TlsStaticOffset = tlsStaticOffset;
+        SdkPs5Version = sdkPs5Version;
     }
 
     public bool IsSelf { get; }
@@ -88,4 +90,10 @@ public sealed class SelfImage
 
     /// <summary>Variant II distance from the thread pointer to this module's static TLS base.</summary>
     public ulong TlsStaticOffset { get; }
+
+    /// <summary>
+    /// The guest's compiled <c>sdk_ps5_ver</c> from its <c>SceProcParam</c>, or
+    /// null when the image exposes none. Auto firmware-version resolution uses it.
+    /// </summary>
+    public uint? SdkPs5Version { get; }
 }

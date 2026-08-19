@@ -169,6 +169,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId);
         _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
+        ConfigureFirmwareProfile(image);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
         var activeImportStubs = new Dictionary<ulong, string>(image.ImportStubs);
@@ -992,6 +993,34 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         return !PreloadSkipModules.Contains(fileName);
+    }
+
+    // Resolves the presented PS5 firmware version once per process: an explicit
+    // operator override (SHARPEMU_FW_VERSION) wins, otherwise Auto mode presents
+    // the guest's own compiled sdk_ps5_ver. The env var is only the current
+    // configuration surface; a CLI flag or config file can feed the same profile
+    // later without touching the sysctl code that reads it.
+    private static void ConfigureFirmwareProfile(SelfImage image)
+    {
+        uint? explicitVersion = null;
+        if (KernelFirmwareProfile.TryParseConfiguredVersion(
+                Environment.GetEnvironmentVariable("SHARPEMU_FW_VERSION"),
+                out var configured))
+        {
+            explicitVersion = configured;
+        }
+
+        KernelFirmwareProfile.Configure(explicitVersion, image.SdkPs5Version);
+
+        if (KernelFirmwareProfile.TryGetPresentedFirmwareVersion(out var presented))
+        {
+            var source = explicitVersion is not null ? "explicit" : "auto(sdk_ps5_ver)";
+            Console.Error.WriteLine($"[RUNTIME] Firmware version: 0x{presented:X8} ({source})");
+        }
+        else
+        {
+            Console.Error.WriteLine("[RUNTIME] Firmware version: unavailable (kern.46 -> ENOENT)");
+        }
     }
 
     private int RegisterLoadedModule(string modulePath, SelfImage image, bool isMain, bool isSystemModule)

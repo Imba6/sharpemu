@@ -37,10 +37,17 @@ public static class KernelSysctlCompatExports
     private const int CtlMaxName = 24;
 
     // Top-level identifiers (sys/sysctl.h).
+    private const int CtlKern = 1;
     private const int CtlHw = 6;
 
     // CTL_HW identifiers (sys/sysctl.h).
     private const int HwPagesize = 7;
+
+    // Sony-specific CTL_KERN node: kernel_get_fw_version reads {CTL_KERN, 46} for
+    // the presented PS5 system-software version. The value is not a FreeBSD
+    // constant and is not invented here; it comes from KernelFirmwareProfile,
+    // which returns nothing (-> ENOENT) until a version is configured or derived.
+    private const int KernFwVersionPs5 = 46;
 
     // PS4/PS5 userspace page size. Not invented for this call: the memory
     // compat layer already models the guest page as 0x4000, and the loader
@@ -61,6 +68,12 @@ public static class KernelSysctlCompatExports
             [CtlHw, HwPagesize],
             "hw.pagesize",
             static () => Int32Value(OrbisPageSizeBytes)),
+        new(
+            [CtlKern, KernFwVersionPs5],
+            "kern.fw_version_ps5",
+            static () => KernelFirmwareProfile.TryGetPresentedFirmwareVersion(out var version)
+                ? Int32Value(unchecked((int)version))
+                : null),
     ];
 
     private static byte[] Int32Value(int value)

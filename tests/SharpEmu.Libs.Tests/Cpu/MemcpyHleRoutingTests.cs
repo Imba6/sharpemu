@@ -139,6 +139,13 @@ public sealed class MemcpyHleRoutingTests
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(trampolineList);
         trampolineList.SetValue(backend, new List<nint>());
+        // The trampoline list is guarded by a lock; GetUninitializedObject skips
+        // the inline field initializer, so seed the gate the production code locks.
+        var trampolineGate = typeof(DirectExecutionBackend).GetField(
+            "_importHandlerTrampolineGate",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(trampolineGate);
+        trampolineGate.SetValue(backend, new object());
 
         var method = typeof(DirectExecutionBackend).GetMethod(
             "TryCreateNativeImportIntrinsic",
