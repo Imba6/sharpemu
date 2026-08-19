@@ -136,7 +136,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M6 — libc ceil
 
-- Commit: (this milestone)
+- Commit: 11b8e69
 - API: `ceil` (gacfOmO8hNs), libc.
 - Before: unresolved; called ~1078 times across the frame loop (FrameStats
   overlay math), returning NOT_FOUND each time.
@@ -149,3 +149,20 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 - Managed suite: 918 passed, 0 failed.
 - Remaining runtime-hit missing imports: `srand48`/`lrand48` (+KSnjvZ0NMc /
   5IpoNfxu84U, RNG seeding), `time` (wLlFkwG9UcQ).
+
+### M7 — libc drand48 family (srand48 + lrand48)
+
+- Commit: (this milestone)
+- APIs: `srand48` (+KSnjvZ0NMc), `lrand48` (5IpoNfxu84U), libc. One shared 48-bit
+  LCG state in `src/SharpEmu.Libs/LibcRand48Exports.cs`.
+- Before: both unresolved; the runtime seeds/draws RNG during init (srand48 x1,
+  lrand48 x8), returning NOT_FOUND.
+- After: resolved with the standard recurrence (a=0x5DEECE66D, c=0xB, mod 2^48);
+  srand48 seeds X=(seed<<16)|0x330E, lrand48 returns the top 31 bits. No more
+  unresolved RNG imports; frame loop unchanged (submitted_fps ~16).
+- Scanner after: SharpEmu 121, Missing 23, Blockers 0.
+- Regression: `tests/SharpEmu.Libs.Tests/Libc/LibcRand48ExportsTests.cs`
+  (independently-computed reference sequences for seeds 0/1/12345, low-32-bit
+  seeding, reseed reproducibility, 31-bit range).
+- Managed suite: 924 passed, 0 failed.
+- Only remaining runtime-hit missing import: `time` (wLlFkwG9UcQ).
