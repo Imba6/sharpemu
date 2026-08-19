@@ -186,7 +186,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M9 — fopen/freopen: empty resolved path is ENOENT, not a host crash
 
-- Commit: (this milestone)
+- Commit: c99d20e
 - API: `fopen` (xeYO4u7uyJ0), `freopen` — existing exports, corrected. Bug fix,
   not new NIDs.
 - Root cause (source + runtime trace, no binary analysis): the .NET NativeAOT
@@ -209,6 +209,24 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 - Regression: `tests/SharpEmu.Libs.Tests/Libc/LibcStdioFopenTests.cs` (fopen/
   freopen empty and whitespace path -> NOT_FOUND, no throw, NULL FILE*).
 - Managed suite: 930 passed, 0 failed.
+
+## Static backlog (not runtime-hit by ProsperoGame)
+
+With every runtime-hit import resolved and the frame loop healthy, the remaining
+progress is the low-risk fallback backlog from the task: standard libc functions
+the target does not itself call but that lower the static missing count and are
+correct to have. Each gets real semantics, pointer validation, a focused
+regression, and its own commit.
+
+### M10 — libc bcmp
+
+- Commit: (this milestone)
+- API: `bcmp` (5TjaJwkLWxE), libc.
+- Byte comparison returning 0 when equal, nonzero otherwise (mirrors the existing
+  Memcmp; validates guest pointers, MEMORY_FAULT on a bad address).
+- Not runtime-hit; resolved statically. Scanner SharpEmu 122->123, Missing 22->21.
+- Regression: `tests/SharpEmu.Libs.Tests/Kernel/KernelBcmpTests.cs`.
+- Managed suite: 935 passed, 0 failed.
 
 ## Current state / remaining work
 

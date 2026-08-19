@@ -1410,6 +1410,45 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "5TjaJwkLWxE",
+        ExportName = "bcmp",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Bcmp(CpuContext ctx)
+    {
+        // bcmp compares n bytes and returns zero when they are equal, nonzero
+        // otherwise (unlike memcmp it does not order the operands). Returning the
+        // first byte difference is a valid nonzero and mirrors Memcmp above.
+        var left = ctx[CpuRegister.Rdi];
+        var right = ctx[CpuRegister.Rsi];
+        var count = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
+        if (count < 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        Span<byte> leftByte = stackalloc byte[1];
+        Span<byte> rightByte = stackalloc byte[1];
+        for (var i = 0; i < count; i++)
+        {
+            if (!TryReadCompat(ctx, left + (ulong)i, leftByte) ||
+                !TryReadCompat(ctx, right + (ulong)i, rightByte))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (leftByte[0] != rightByte[0])
+            {
+                ctx[CpuRegister.Rax] = 1;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "QrZZdJ8XsX0",
         ExportName = "fputs",
         Target = Generation.Gen4 | Generation.Gen5,
