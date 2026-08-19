@@ -253,6 +253,17 @@ int main(void)
 
     doomgeneric_Create(3, argv);
 
+    // Redirect Doom's savegame directory to the writable, per-title sandbox
+    // mount (/download0). DoomGeneric's GetDefaultConfigDir() hardcodes "."; our
+    // runtime maps a relative path under the read-only /app0, so savegames (and
+    // the ./.savegame mkdir) fail there. /download0 is writable and auto-created
+    // by the runtime, and stays inside the guest filesystem sandbox — no host
+    // absolute path is exposed. Config (default.cfg) is loaded during
+    // doomgeneric_Create and only rewritten at exit, which this loop never
+    // reaches, so it does not round-trip; savegames do.
+    extern char *savegamedir;
+    savegamedir = "/download0/";
+
     // D_DoomMain normally runs the loop and never returns; keep ticking if it does.
     for (;;) {
         doomgeneric_Tick();
