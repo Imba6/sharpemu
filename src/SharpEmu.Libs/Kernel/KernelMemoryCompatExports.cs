@@ -70,6 +70,7 @@ public static partial class KernelMemoryCompatExports
     private const int Enomem = 12;
     private const int Eacces = 13;
     private const int Efault = 14;
+    private const int Eexist = 17;
     private const int Einval = 22;
     private const int Erange = 34;
     private const int Struncate = 80;
@@ -1724,6 +1725,38 @@ public static partial class KernelMemoryCompatExports
         return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
             ? 0
             : PosixFailure(ctx, result);
+    }
+
+    // POSIX mkdir(2): mkdir(const char *path, mode_t mode). Delegates to the raw
+    // sceKernelMkdir (which reads the path from RDI, same as libc; the mode in RSI
+    // is advisory and the host applies its default directory permissions) and maps
+    // the result to the libc ABI: 0 on success, -1 with errno on failure. An
+    // existing target becomes EEXIST, which POSIX callers such as DoomGeneric's
+    // M_MakeDirectory treat as success. Guest paths are translated through the same
+    // mount table as the rest of the filesystem HLE, so no host path is exposed.
+    [SysAbiExport(
+        Nid = "JGMio+21L4c",
+        ExportName = "mkdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int PosixMkdir(CpuContext ctx)
+    {
+        var result = KernelMkdir(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            // KernelMkdir already wrote 0 into RAX; the import bridge prefers the
+            // written RAX over the return value.
+            return 0;
+        }
+
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS)
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Eexist);
+            ctx[CpuRegister.Rax] = ulong.MaxValue;
+            return -1;
+        }
+
+        return PosixFailure(ctx, result);
     }
 
     // POSIX open(2): translates a failed raw open into -1/errno. On success
