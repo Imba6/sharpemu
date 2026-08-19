@@ -1,0 +1,619 @@
+{
+  "schema_version": 2,
+  "target": {
+    "name": "eboot.bin",
+    "path": "/home/illia/projects/virtualps5/real-tests/DoomGeneric/eboot.bin",
+    "generation": "Gen5",
+    "needed_libraries": [
+      "libScePad.sprx",
+      "libSceVideoOut.sprx",
+      "libSceUserService.sprx",
+      "libkernel.sprx",
+      "libSceLibcInternal.sprx",
+      "libSceNet.sprx"
+    ]
+  },
+  "runtime": {
+    "log": "/tmp/doomgeneric-run.log",
+    "static_nids_resolved": 56,
+    "imported_data_rebound": 0,
+    "imported_data_unresolved": 3,
+    "stall_import_stub": null,
+    "stall_import_name": null
+  },
+  "summary": {
+    "imports_total": 56,
+    "implemented_virtualps5": 7,
+    "implemented_sharpemu": 35,
+    "missing": 11,
+    "unresolved_data": 3,
+    "unknown_data": 0,
+    "blocking": 0
+  },
+  "blockers": [],
+  "dynamic_requests": [],
+  "imports": [
+    {
+      "name": "__error",
+      "nid": "9BcDykPmo1I",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelRuntimeCompatExports.cs"
+    },
+    {
+      "name": "__isthreaded",
+      "nid": "q1OvUam0BJU",
+      "library": "libSceLibcInternal",
+      "kind": "data",
+      "symbol_type": "OBJECT",
+      "status": "unresolved-data",
+      "priority": 30
+    },
+    {
+      "name": "__stderrp",
+      "nid": "as8Od-tH1BI",
+      "library": "libSceLibcInternal",
+      "kind": "data",
+      "symbol_type": "OBJECT",
+      "status": "unresolved-data",
+      "priority": 30
+    },
+    {
+      "name": "__stdoutp",
+      "nid": "zqJhBxAKfsc",
+      "library": "libSceLibcInternal",
+      "kind": "data",
+      "symbol_type": "OBJECT",
+      "status": "unresolved-data",
+      "priority": 30
+    },
+    {
+      "name": "__swbuf",
+      "nid": "TP6INgQ6N4o",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "atof",
+      "nid": "SRI6S9B+-a4",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "atoi",
+      "nid": "fPxypibz2MY",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "calloc",
+      "nid": "2X5agFjKxMc",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "exit",
+      "nid": "uMei1W9uyNo",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelExports.cs"
+    },
+    {
+      "name": "fclose",
+      "nid": "uodLYyUip20",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "fflush",
+      "nid": "MUjC4lbHrK4",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "fopen",
+      "nid": "xeYO4u7uyJ0",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "fprintf",
+      "nid": "fffwELXNVFA",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "fread",
+      "nid": "lbB+UlZqVG0",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "free",
+      "nid": "tIhsqj0qsFE",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "fseek",
+      "nid": "rQFVBXp-Cxg",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "ftell",
+      "nid": "Qazy8LmXTvw",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "fwrite",
+      "nid": "MpxhMh8QFro",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "malloc",
+      "nid": "gQX+4GDQjpM",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "memchr",
+      "nid": "8u8lPzUEq+U",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "memcpy",
+      "nid": "Q3VBxCXhUHs",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "memset",
+      "nid": "8zTFvBIAIN8",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "mkdir",
+      "nid": "JGMio+21L4c",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "printf",
+      "nid": "hcuQgD53UxM",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelExports.cs"
+    },
+    {
+      "name": "putc",
+      "nid": "tLB5+4TEOK0",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "putchar",
+      "nid": "m5wN+SwZOR4",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "puts",
+      "nid": "YQ0navp+YIc",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "realloc",
+      "nid": "Y7aJ1uydPMo",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "remove",
+      "nid": "MZO7FXyAPU8",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "rename",
+      "nid": "NN01qLRhiqU",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelFileExtendedExports.cs"
+    },
+    {
+      "name": "sceKernelGetProcessTime",
+      "nid": "4J2sUJmuHZQ",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceKernelUsleep",
+      "nid": "1jfXLRVzisc",
+      "library": "libKernel",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "scePadInit",
+      "nid": "hv1luiJrqQM",
+      "library": "libScePad",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "scePadOpen",
+      "nid": "xk0AcarP3V4",
+      "library": "libScePad",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "scePadReadState",
+      "nid": "YndgXqQVV7c",
+      "library": "libScePad",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceUserServiceGetInitialUser",
+      "nid": "CdWp0oHWGr0",
+      "library": "libSceUserService",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceUserServiceInitialize",
+      "nid": "j3YMu1MVNNo",
+      "library": "libSceUserService",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "virtualps5"
+    },
+    {
+      "name": "sceVideoOutOpen",
+      "nid": "Up36PTk687E",
+      "library": "libSceVideoOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/VideoOut/VideoOutExports.cs"
+    },
+    {
+      "name": "sceVideoOutRegisterBuffers",
+      "nid": "w3BY+tAEiQY",
+      "library": "libSceVideoOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/VideoOut/VideoOutExports.cs"
+    },
+    {
+      "name": "sceVideoOutSetBufferAttribute",
+      "nid": "i6-sR91Wt-4",
+      "library": "libSceVideoOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/VideoOut/VideoOutExports.cs"
+    },
+    {
+      "name": "sceVideoOutSubmitFlip",
+      "nid": "U46NwOiJpys",
+      "library": "libSceVideoOut",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/VideoOut/VideoOutExports.cs"
+    },
+    {
+      "name": "snprintf",
+      "nid": "eLdDw6l0-bU",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "sscanf",
+      "nid": "1Pk0qZQGeWo",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "strcmp",
+      "nid": "Ovb2dSJOAuE",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strdup",
+      "nid": "g7zzzLDYGw0",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "strlen",
+      "nid": "j4ViWNHEgww",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strncasecmp",
+      "nid": "strncasecmp",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "raw_symbol": "strncasecmp",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strncmp",
+      "nid": "aesyjrHVWy4",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strncpy",
+      "nid": "6sJWiWSRuqk",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strrchr",
+      "nid": "9yDWMxEFdJU",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "strstr",
+      "nid": "viiwFMaNamA",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "system",
+      "nid": "Jc6E7N+dHz0",
+      "library": "libSceLibcInternal",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "missing",
+      "priority": 40
+    },
+    {
+      "name": "tolower",
+      "nid": "PqF+kHW-2WQ",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "toupper",
+      "nid": "TYE4irxSmko",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    },
+    {
+      "name": "vfprintf",
+      "nid": "pDBDcY6uLSA",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStdioExports.cs"
+    },
+    {
+      "name": "vsnprintf",
+      "nid": "Q2V+iqvjgC0",
+      "library": "libc",
+      "kind": "function",
+      "symbol_type": "FUNC",
+      "status": "implemented",
+      "priority": 100,
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/Kernel/KernelMemoryCompatExports.cs"
+    }
+  ]
+}

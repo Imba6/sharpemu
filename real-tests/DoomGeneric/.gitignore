@@ -1,0 +1,3 @@
+# Do not commit proprietary or bundled Doom assets.
+*.wad
+port/build-ps5/
