@@ -7746,6 +7746,70 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "pXvbDfchu6k",
+        ExportName = "strncasecmp",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strncasecmp(CpuContext ctx)
+    {
+        var left = ctx[CpuRegister.Rdi];
+        var right = ctx[CpuRegister.Rsi];
+        var count = ctx[CpuRegister.Rdx];
+
+        // Comparing zero bytes is always equal, even with null pointers.
+        if (count == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (left == 0 || right == 0)
+        {
+            ctx[CpuRegister.Rax] = left == right ? 0uL : 1uL;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!TryCompareStringsCaseInsensitive(ctx, left, right, limit: count, out var compare))
+        {
+            ctx[CpuRegister.Rax] = 1;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)compare);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "PqF+kHW-2WQ",
+        ExportName = "tolower",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Tolower(CpuContext ctx)
+    {
+        // int tolower(int c): fold an ASCII uppercase letter to lowercase; every
+        // other value (including EOF) is returned unchanged.
+        var c = unchecked((int)ctx[CpuRegister.Rdi]);
+        var result = c is >= 'A' and <= 'Z' ? c + 32 : c;
+        ctx[CpuRegister.Rax] = unchecked((ulong)(uint)result);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "TYE4irxSmko",
+        ExportName = "toupper",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Toupper(CpuContext ctx)
+    {
+        // int toupper(int c): fold an ASCII lowercase letter to uppercase; every
+        // other value (including EOF) is returned unchanged.
+        var c = unchecked((int)ctx[CpuRegister.Rdi]);
+        var result = c is >= 'a' and <= 'z' ? c - 32 : c;
+        ctx[CpuRegister.Rax] = unchecked((ulong)(uint)result);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     // sprintf/vsprintf are served from the same HLE formatting engine as snprintf/vsnprintf
     // instead of falling through to the game's bundled libc.
     [SysAbiExport(
