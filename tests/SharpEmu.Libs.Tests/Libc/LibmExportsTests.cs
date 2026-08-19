@@ -56,4 +56,35 @@ public sealed class LibmExportsTests
         Assert.True(double.IsPositiveInfinity(Ceil(double.PositiveInfinity)));
         Assert.True(double.IsNegativeInfinity(Ceil(double.NegativeInfinity)));
     }
+
+    private static double Log(double x)
+    {
+        var ctx = new CpuContext(new FakeCpuMemory(0x1_0000_0000, 0x100), Generation.Gen5);
+        ctx.SetXmmRegister(0, unchecked((ulong)BitConverter.DoubleToInt64Bits(x)), 0xBEEF);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, LibmExports.Log(ctx));
+        ctx.GetXmmRegister(0, out var low, out _);
+        return BitConverter.Int64BitsToDouble(unchecked((long)low));
+    }
+
+    [Fact]
+    public void Log_One_IsZero() => Assert.Equal(0.0, Log(1.0));
+
+    [Fact]
+    public void Log_E_IsOne() => Assert.Equal(1.0, Log(Math.E), 12);
+
+    [Fact]
+    public void Log_KnownValue() => Assert.Equal(Math.Log(10.0), Log(10.0), 12);
+
+    [Fact]
+    public void Log_Zero_IsNegativeInfinity() => Assert.True(double.IsNegativeInfinity(Log(0.0)));
+
+    [Fact]
+    public void Log_Negative_IsNan() => Assert.True(double.IsNaN(Log(-1.0)));
+
+    [Fact]
+    public void Log_Nan_IsNan() => Assert.True(double.IsNaN(Log(double.NaN)));
+
+    [Fact]
+    public void Log_PositiveInfinity_IsPositiveInfinity() =>
+        Assert.True(double.IsPositiveInfinity(Log(double.PositiveInfinity)));
 }

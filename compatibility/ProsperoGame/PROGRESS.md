@@ -255,7 +255,7 @@ regression, and its own commit.
 
 ### M13 — libc strtok_r
 
-- Commit: (this milestone)
+- Commit: f635322
 - API: `strtok_r` (enqPGLfmVNU), libc.
 - Reentrant tokenizer that splits a guest string in place on any delimiter
   character, resuming from the caller's saveptr; skips leading/repeated
@@ -267,6 +267,22 @@ regression, and its own commit.
   delimiter, leading/trailing/repeated delimiters, empty and all-delimiter input,
   no-delimiter single token, null saveptr).
 - Managed suite: 957 passed, 0 failed.
+
+### M14 — libc log
+
+- Commit: (this milestone)
+- API: `log` (rtV7-jWC6Yg), libc. Added to the scalar-double libm surface next to
+  ceil.
+- Natural logarithm; Math.Log matches C log for the special cases: log(1)=0,
+  log(0)=-inf (pole), log(x<0)=NaN (domain), log(+inf)=+inf, log(NaN)=NaN.
+- Not runtime-hit; resolved statically. Scanner SharpEmu 127->128, Missing 17->16.
+- Regression: added to `tests/SharpEmu.Libs.Tests/Libc/LibmExportsTests.cs`
+  (log 1/e/10, zero pole, negative domain, NaN, +inf).
+- Managed suite: 964 passed, 0 failed.
+
+With M14 the entire low-risk fallback backlog from the task is implemented and
+tested (integer conversions, condattr clock, current cpu, pthread_sigmask, bcmp,
+sched_yield, time, strerror/strerror_r, strtok_r, srand48/lrand48, ceil, log).
 
 ## Current state / remaining work
 

@@ -29,6 +29,20 @@ public static class LibmExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "rtV7-jWC6Yg",
+        ExportName = "log",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Log(CpuContext ctx)
+    {
+        var x = ReadDoubleArg(ctx);
+        // Math.Log matches C log: log(1)=0, log(0)=-inf (pole), log(x<0)=NaN
+        // (domain error), log(+inf)=+inf, log(NaN)=NaN.
+        WriteDoubleResult(ctx, Math.Log(x));
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static double ReadDoubleArg(CpuContext ctx)
     {
         ctx.GetXmmRegister(Xmm0, out var low, out _);
