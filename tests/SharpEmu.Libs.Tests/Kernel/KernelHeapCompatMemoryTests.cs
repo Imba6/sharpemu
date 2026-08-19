@@ -51,4 +51,61 @@ public sealed class KernelHeapCompatMemoryTests
         ctx[CpuRegister.Rdi] = address;
         KernelMemoryCompatExports.Free(ctx);
     }
+
+    // The compat helpers report which class of memory serviced the access so the
+    // stdio profiler (and any future fast path) can tell a guest-mapped buffer
+    // from a libc host-heap buffer. A mapped guest destination must resolve on
+    // the guest fast path (guestHit == true).
+    [Fact]
+    public void CompatWriteRead_MappedGuestBuffer_ReportsGuestHit()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        var payload = new byte[256];
+        for (var i = 0; i < payload.Length; i++)
+        {
+            payload[i] = (byte)(i ^ 0x5A);
+        }
+
+        Assert.True(KernelMemoryCompatExports.TryWriteCompat(ctx, MemoryBase, payload, out var writeGuestHit));
+        Assert.True(writeGuestHit);
+
+        var readback = new byte[payload.Length];
+        Assert.True(KernelMemoryCompatExports.TryReadCompat(ctx, MemoryBase, readback, out var readGuestHit));
+        Assert.True(readGuestHit);
+        Assert.Equal(payload, readback);
+    }
+
+    // A libc malloc() destination lives outside the guest map, so the compat
+    // helpers must fall back to the host-memory path and report guestHit == false.
+    [Fact]
+    public void CompatWriteRead_MallocHostBuffer_ReportsHostFallback()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        const int size = 4096;
+        ctx[CpuRegister.Rdi] = size;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.Malloc(ctx));
+        var address = ctx[CpuRegister.Rax];
+        Assert.NotEqual(0UL, address);
+
+        var payload = new byte[size];
+        for (var i = 0; i < size; i++)
+        {
+            payload[i] = (byte)((i * 7 + 3) & 0xFF);
+        }
+
+        Assert.True(KernelMemoryCompatExports.TryWriteCompat(ctx, address, payload, out var writeGuestHit));
+        Assert.False(writeGuestHit); // host-heap fallback, not the guest map
+
+        var readback = new byte[size];
+        Assert.True(KernelMemoryCompatExports.TryReadCompat(ctx, address, readback, out var readGuestHit));
+        Assert.False(readGuestHit);
+        Assert.Equal(payload, readback);
+
+        ctx[CpuRegister.Rdi] = address;
+        KernelMemoryCompatExports.Free(ctx);
+    }
 }

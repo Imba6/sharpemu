@@ -5947,8 +5947,12 @@ public static partial class KernelMemoryCompatExports
         return !string.IsNullOrWhiteSpace(guestPath);
     }
 
-    internal static bool TryReadCompat(CpuContext ctx, ulong address, Span<byte> destination)
+    internal static bool TryReadCompat(CpuContext ctx, ulong address, Span<byte> destination) =>
+        TryReadCompat(ctx, address, destination, out _);
+
+    internal static bool TryReadCompat(CpuContext ctx, ulong address, Span<byte> destination, out bool guestHit)
     {
+        guestHit = false;
         if (destination.IsEmpty)
         {
             return true;
@@ -5956,6 +5960,7 @@ public static partial class KernelMemoryCompatExports
 
         if (ctx.Memory.TryRead(address, destination))
         {
+            guestHit = true;
             return true;
         }
 
@@ -6013,8 +6018,12 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    internal static bool TryWriteCompat(CpuContext ctx, ulong address, ReadOnlySpan<byte> source)
+    internal static bool TryWriteCompat(CpuContext ctx, ulong address, ReadOnlySpan<byte> source) =>
+        TryWriteCompat(ctx, address, source, out _);
+
+    internal static bool TryWriteCompat(CpuContext ctx, ulong address, ReadOnlySpan<byte> source, out bool guestHit)
     {
+        guestHit = false;
         if (source.IsEmpty)
         {
             return true;
@@ -6022,6 +6031,7 @@ public static partial class KernelMemoryCompatExports
 
         if (ctx.Memory.TryWrite(address, source))
         {
+            guestHit = true;
             return true;
         }
 

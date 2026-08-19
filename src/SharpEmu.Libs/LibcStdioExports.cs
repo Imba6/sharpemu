@@ -130,6 +130,7 @@ public static class LibcStdioExports
             }
 
             _fileHandles[handle] = stream;
+            StdioProfiler.CountFopen();
 
             if (_traceStdio)
             {
@@ -174,7 +175,10 @@ public static class LibcStdioExports
 
         try
         {
+            var ioStart = StdioProfiler.StartInterval();
             stream.Seek(offset, origin);
+            StdioProfiler.AddHostIo(ioStart);
+            StdioProfiler.CountFseek();
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -202,6 +206,7 @@ public static class LibcStdioExports
 
         try
         {
+            StdioProfiler.CountFtell();
             ctx[CpuRegister.Rax] = unchecked((ulong)stream.Position);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -230,6 +235,7 @@ public static class LibcStdioExports
         try
         {
             stream.Dispose();
+            StdioProfiler.CountFclose();
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -273,7 +279,9 @@ public static class LibcStdioExports
             while (totalRead < totalRequested)
             {
                 var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalRead);
+                var ioStart = StdioProfiler.StartInterval();
                 var read = stream.Read(buffer, 0, request);
+                StdioProfiler.AddHostIo(ioStart);
                 if (read <= 0)
                 {
                     break;
@@ -283,7 +291,10 @@ public static class LibcStdioExports
                 // which for a libc malloc()/Z_Malloc() destination live in host heap
                 // memory outside the guest map. The compat path falls back to a
                 // direct host write there, exactly like the other stdio helpers.
-                if (!KernelMemoryCompatExports.TryWriteCompat(ctx, destination + totalRead, buffer.AsSpan(0, read)))
+                var copyStart = StdioProfiler.StartInterval();
+                var ok = KernelMemoryCompatExports.TryWriteCompat(ctx, destination + totalRead, buffer.AsSpan(0, read), out var guestHit);
+                StdioProfiler.AddCopy(copyStart, guestHit);
+                if (!ok)
                 {
                     ctx[CpuRegister.Rax] = totalRead / elementSize;
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -308,6 +319,7 @@ public static class LibcStdioExports
                 $"[LOADER][TRACE] fread: handle=0x{handle:X} requested={totalRequested} read={totalRead} pos={stream.Position}");
         }
 
+        StdioProfiler.CountFread((long)totalRead);
         ctx[CpuRegister.Rax] = totalRead / elementSize;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -400,6 +412,7 @@ public static class LibcStdioExports
 
         try
         {
+            StdioProfiler.CountFgetc();
             var value = stream.ReadByte();
             ctx[CpuRegister.Rax] = value < 0 ? unchecked((ulong)(-1L)) : (ulong)value;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -419,6 +432,7 @@ public static class LibcStdioExports
     public static int Feof(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
+        StdioProfiler.CountFeof();
         var atEnd = _fileHandles.TryGetValue(handle, out var stream) &&
             stream.CanRead && stream.Position >= stream.Length;
         ctx[CpuRegister.Rax] = atEnd ? 1UL : 0UL;
@@ -444,6 +458,7 @@ public static class LibcStdioExports
     public static int Rewind(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
+        StdioProfiler.CountRewind();
         if (_fileHandles.TryGetValue(handle, out var stream))
         {
             try
@@ -556,6 +571,7 @@ public static class LibcStdioExports
             ArrayPool<byte>.Shared.Return(buffer);
         }
 
+        StdioProfiler.CountFwrite((long)totalWritten);
         ctx[CpuRegister.Rax] = totalWritten / elementSize;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
