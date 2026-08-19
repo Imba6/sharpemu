@@ -203,6 +203,14 @@ C = fire; V = use/open; Q/E = strafe; left stick = move). Verify:
 9. Esc returns to the menu; the game keeps presenting at ~60 fps throughout.
 10. No audio yet (expected — M2E not implemented).
 
+Manual validation 19-08-2026 21-58:
+- Doom/Freedoom boots correctly
+- menu navigation works
+- gameplay input works
+- no stuck controls observed
+- rendering stable
+- stable 60 FPS during gameplay
+
 ## Audio (M2E) — not started, assessment
 
 DoomGeneric routes SFX through a `sound_module_t` (`i_sound.c`); the SDL/Allegro backends
