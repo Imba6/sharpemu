@@ -72,3 +72,45 @@ Static scan: Gen5, imports 56, VPS5 7, SharpEmu 32, Missing 14, Blockers 0.
   tLB5+4TEOK0 / m5wN+SwZOR4 / YQ0navp+YIc) and `mkdir` (save dir) are still unresolved
   but only warn. `system` (Jc6E7N+dHz0) is fatal only inside Doom's I_Error path, which
   the clean run does not reach. These are the M2 candidates.
+
+### M2A — startup performance (first frame ~50s → ~9s)
+
+- Date: 2026-08-19
+- Commits: 804d1c2 (gate libKernel time-poll logging), 6cc6896 (env-gated stdio
+  profiler + compat access-class reporting)
+- **Problem before**: first visible Doom frame took ~50s under `make real-run`.
+- **Profiling method (do not assume — measure)**: added an env-gated stdio profiler
+  (`SHARPEMU_PROFILE_STDIO=1`) emitting a throttled once-per-second summary
+  (fopen/fread/fseek counts, bytes, read-size min/max/avg, host-I/O time, compat-copy
+  time, guest-map-hit vs libc-host-heap-fallback split), plus wall-clock–timestamped
+  runs. Key numbers to first frame:
+  - WAD/stdio: ~14 MB across ~2260 `fread`s (avg 6.3 KB, one `fseek` per read),
+    **host I/O ~0.6s, compat-copy ~33ms** — essentially all reads land in libc
+    malloc/Z_Malloc host-heap buffers (copyHost≈2259, copyGuest=1), and the WAD is
+    fully consumed within the **first second**. **stdio is not the bottleneck.**
+  - Dominant cost: `sceKernelGetProcessTime` (DoomGeneric `I_GetTime` + tic busy-loop,
+    ~12×/frame) was called **83,587×**, each emitting an unconditional
+    `Console.Error.WriteLine`. Guest execution serialized on host console I/O.
+- **Root cause**: per-poll console spam in the libKernel time helpers
+  (`TimeExports.cs`), not stdio. Exactly the per-frame/per-poll logging AGENTS.md
+  forbids.
+- **Implementation**: gated `sceKernelGetProcessTime` / `GetProcessTimeCounter` /
+  `ClockGettime` / `Gettimeofday` / `Usleep` traces behind `SHARPEMU_LOG_KERNEL_TIME=1`
+  (default off), matching the existing `SHARPEMU_LOG_STDIO` pattern. Return values
+  unchanged. No stdio behavior change (stdio already fast and correct after M1); added
+  only the profiler and `TryRead/WriteCompat` out-bool access-class reporting.
+- **Performance before/after** (same `make real-run` config: `--log-level=debug
+  --trace-imports 16`):
+  - first presented frame: **~50s → ~9.4s** (of which ~4.8s is `dotnet run` build-check
+    + .NET startup harness overhead; **emulator-internal start→first-frame ~4.6s**,
+    under the <5s target). WAD fopen→first present ~2.1s.
+  - GetProcessTime log lines: **83587 → 1**; total run-log lines **91667 → 3756**.
+  - Steady state unchanged: stable **60 fps**, present_dropped=0, no fatal dispatch,
+    no host crash.
+- **Regressions added**: `KernelHeapCompatMemoryTests` — mapped-guest buffer reports
+  `guestHit == true`; libc malloc() host-heap buffer round-trips via host fallback with
+  `guestHit == false` (both stdio memory classes).
+- Managed suite: **1000 → 1002 passed**, 0 failed.
+- Scanner: unchanged (imports 56, SharpEmu 35, Missing 11, Blockers 0) — no NID added.
+- Next blocker: verify real gameplay input transitions (KEYDOWN/KEYUP, held keys) —
+  M2B.
