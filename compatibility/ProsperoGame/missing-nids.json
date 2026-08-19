@@ -14,18 +14,18 @@
     ]
   },
   "runtime": {
-    "log": "/home/illia/projects/virtualps5/real-tests/ProsperoGame/run.log",
+    "log": "/tmp/prospero-game-run.log",
     "static_nids_resolved": 0,
     "imported_data_rebound": 2,
     "imported_data_unresolved": 2,
-    "stall_import_stub": "XKRegsFpEpk",
-    "stall_import_name": "catchReturnFromMain"
+    "stall_import_stub": null,
+    "stall_import_name": null
   },
   "summary": {
     "imports_total": 154,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 111,
-    "missing": 33,
+    "implemented_sharpemu": 115,
+    "missing": 29,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -279,15 +279,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "5OqszGpy7Mg#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrtolExports.cs"
     },
     {
       "name": "bcmp",
@@ -1261,15 +1263,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "QxmSHBCuKTk#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrtolExports.cs"
     },
     {
       "name": "strerror_r",
@@ -1433,15 +1437,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "VOBg+iNwB-4#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrtolExports.cs"
     },
     {
       "name": "sceSystemServiceHideSplashScreen",
@@ -2115,15 +2121,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "mXlxhmLNMPg#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrtolExports.cs"
     },
     {
       "name": "pthread_cond_broadcast",
