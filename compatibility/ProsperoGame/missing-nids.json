@@ -24,8 +24,8 @@
   "summary": {
     "imports_total": 154,
     "implemented_virtualps5": 7,
-    "implemented_sharpemu": 124,
-    "missing": 20,
+    "implemented_sharpemu": 126,
+    "missing": 18,
     "unresolved_data": 3,
     "unknown_data": 0,
     "blocking": 0
@@ -1291,15 +1291,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "RBcs3uut1TA#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrerrorExports.cs"
     },
     {
       "name": "strerror",
@@ -1307,15 +1309,17 @@
       "library": "libc",
       "kind": "function",
       "symbol_type": "FUNC",
-      "status": "missing",
-      "priority": 40,
+      "status": "implemented",
+      "priority": 100,
       "raw_symbol": "RIa6GnWp+iU#A#B",
       "symbol_suffix": [
         "A",
         "B"
       ],
       "module_id": "A",
-      "library_id": "B"
+      "library_id": "B",
+      "provider": "sharpemu",
+      "implementation_source": "src/SharpEmu.Libs/LibcStrerrorExports.cs"
     },
     {
       "name": "pthread_cond_destroy",

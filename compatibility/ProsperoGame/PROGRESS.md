@@ -230,13 +230,28 @@ regression, and its own commit.
 
 ### M11 — libc sched_yield
 
-- Commit: (this milestone)
+- Commit: dbc1bbb
 - API: `sched_yield` (6XG4B33N09g), libc.
 - Yields the processor via Thread.Yield (same as the existing scePthreadYield) and
   returns 0. Not runtime-hit; resolved statically. Scanner SharpEmu 123->124,
   Missing 21->20.
 - Regression: `tests/SharpEmu.Libs.Tests/Pthread/SchedYieldTests.cs`.
 - Managed suite: 936 passed, 0 failed.
+
+### M12 — libc strerror + strerror_r
+
+- Commit: (this milestone)
+- APIs: `strerror` (RIa6GnWp+iU), `strerror_r` (RBcs3uut1TA), libc. Shared FreeBSD
+  sys_errlist message table in `src/SharpEmu.Libs/LibcStrerrorExports.cs`.
+- strerror returns a pointer to guest-resident static storage per distinct message
+  (materialized once and cached); strerror_r is the XSI variant returning 0 /
+  EINVAL (unknown errno) / ERANGE (truncated, overrides EINVAL) and always
+  null-terminating. Unknown errnos render "Unknown error: N".
+- Not runtime-hit; resolved statically. Scanner SharpEmu 124->126, Missing 20->18.
+- Regression: `tests/SharpEmu.Libs.Tests/Libc/LibcStrerrorExportsTests.cs`
+  (message table known/unknown, strerror_r return codes and truncation, strerror
+  pointer reuse where the harness backs allocation).
+- Managed suite: 949 passed, 0 failed.
 
 ## Current state / remaining work
 
