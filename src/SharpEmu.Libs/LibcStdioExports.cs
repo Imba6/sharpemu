@@ -13,6 +13,7 @@ public static class LibcStdioExports
 {
     private const int MaxPathLength = 4096;
     private const int MaxModeLength = 16;
+    private const int MaxConsoleStringLength = 8192;
     private const int ReadChunkSize = 1024 * 1024;
     private const ulong GuestFileObjectSize = 0x100;
 
@@ -483,7 +484,66 @@ public static class LibcStdioExports
     {
         var character = unchecked((byte)ctx[CpuRegister.Rdi]);
         var handle = ctx[CpuRegister.Rsi];
+        return PutcCore(ctx, character, handle);
+    }
 
+    // putc(int c, FILE *stream): the C standard permits putc to be a macro that
+    // may evaluate the stream more than once, but the ABI is identical to fputc,
+    // so share the implementation.
+    [SysAbiExport(
+        Nid = "tLB5+4TEOK0",
+        ExportName = "putc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Putc(CpuContext ctx)
+    {
+        var character = unchecked((byte)ctx[CpuRegister.Rdi]);
+        var handle = ctx[CpuRegister.Rsi];
+        return PutcCore(ctx, character, handle);
+    }
+
+    // putchar(int c): equivalent to putc(c, stdout). The guest passes no FILE, so
+    // this always targets the host console.
+    [SysAbiExport(
+        Nid = "m5wN+SwZOR4",
+        ExportName = "putchar",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Putchar(CpuContext ctx)
+    {
+        var character = unchecked((byte)ctx[CpuRegister.Rdi]);
+        Console.Out.Write((char)character);
+        ctx[CpuRegister.Rax] = character;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // puts(const char *s): writes s followed by a newline to stdout and returns a
+    // non-negative value on success (EOF/-1 on error).
+    [SysAbiExport(
+        Nid = "YQ0navp+YIc",
+        ExportName = "puts",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Puts(CpuContext ctx)
+    {
+        var stringAddress = ctx[CpuRegister.Rdi];
+        if (stringAddress == 0 ||
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, stringAddress, MaxConsoleStringLength, out var text))
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        Console.Out.Write(text);
+        Console.Out.Write('\n');
+        // Return the number of characters written (newline included), which is a
+        // conforming non-negative success value.
+        ctx[CpuRegister.Rax] = (ulong)(text.Length + 1);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int PutcCore(CpuContext ctx, byte character, ulong handle)
+    {
         if (_fileHandles.TryGetValue(handle, out var stream))
         {
             try
