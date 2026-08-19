@@ -7,6 +7,7 @@ using SharpEmu.GUI;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
@@ -1329,18 +1330,42 @@ internal static partial class Program
                 Generation.Gen4 | Generation.Gen5),
         };
         var configuredVideoOptions = LoadConfiguredVideoOptions(ebootPath);
+        var resolvedWidth = windowWidthOverride ?? configuredVideoOptions.Width;
+        var resolvedHeight = windowHeightOverride ?? configuredVideoOptions.Height;
+        var windowScale = ReadWindowScale();
         videoOptions = (configuredVideoOptions with
         {
             WindowMode = windowModeOverride ?? configuredVideoOptions.WindowMode,
             ScalingMode = scalingModeOverride ?? configuredVideoOptions.ScalingMode,
-            Width = windowWidthOverride ?? configuredVideoOptions.Width,
-            Height = windowHeightOverride ?? configuredVideoOptions.Height,
+            // Window scale only resizes the host SDL/Vulkan window; the guest
+            // VideoOut resolution and framebuffer are unchanged (the presenter
+            // scales the guest image to the window). Both axes use the same
+            // factor, so aspect ratio is preserved.
+            Width = (int)Math.Round(resolvedWidth * windowScale),
+            Height = (int)Math.Round(resolvedHeight * windowScale),
             DisplayIndex = displayIndexOverride ?? configuredVideoOptions.DisplayIndex,
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
         }).Normalize();
         return true;
+    }
+
+    // SHARPEMU_WINDOW_SCALE resizes only the host window (e.g. 0.5 -> half-size
+    // window for a large guest output). Default 1.0 (native). Clamped to a sane
+    // range; an unset or unparsable value leaves the window at native size.
+    private static double ReadWindowScale()
+    {
+        var raw = Environment.GetEnvironmentVariable("SHARPEMU_WINDOW_SCALE");
+        if (string.IsNullOrWhiteSpace(raw) ||
+            !double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var scale) ||
+            !double.IsFinite(scale) ||
+            scale <= 0.0)
+        {
+            return 1.0;
+        }
+
+        return Math.Clamp(scale, 0.1, 4.0);
     }
 
     private static HostVideoOptions LoadConfiguredVideoOptions(string ebootPath)
