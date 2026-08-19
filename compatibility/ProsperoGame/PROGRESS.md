@@ -337,7 +337,7 @@ sched_yield, time, strerror/strerror_r, strtok_r, srand48/lrand48, ceil, log).
 
 ### M16 — optimize tiled scan-out presentation (judder profiling)
 
-- Commit: (this milestone)
+- Commit: e8f4da2
 - Area: VideoOut CPU scan-out present path (`VideoOutScanoutDetile`,
   `VulkanVideoPresenter` CPU display-buffer refresh).
 - Motivation: visible judder (~24 fps, ~42 ms avg, ~70 ms max reported by the game
