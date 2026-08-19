@@ -67,6 +67,24 @@ public static class LibcStdioExports
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+
+        // An empty guest path is not a file, and ResolveGuestPath also returns an empty
+        // string when a registered mount denies the path. Either way fopen must report
+        // "no such file" like the C library does for fopen("", ...); constructing a
+        // FileStream on an empty path throws an ArgumentException that is not an
+        // IOException, so without this guard it would escape as a host crash.
+        if (string.IsNullOrWhiteSpace(hostPath))
+        {
+            if (_traceStdio)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] fopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> NOT_FOUND (empty path)");
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
             if (_traceStdio)
@@ -122,7 +140,7 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {
@@ -660,6 +678,21 @@ public static class LibcStdioExports
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+
+        // See Fopen: an empty resolved path (empty input or a denied mount) is
+        // "no such file", not a host crash from constructing a FileStream on "".
+        if (string.IsNullOrWhiteSpace(hostPath))
+        {
+            if (_traceStdio)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] freopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> NOT_FOUND (empty path)");
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
             ctx[CpuRegister.Rax] = 0;
@@ -690,7 +723,7 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {

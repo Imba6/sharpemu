@@ -169,7 +169,7 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 
 ### M8 — libc time
 
-- Commit: (this milestone)
+- Commit: 4f0e09e
 - API: `time` (wLlFkwG9UcQ), libc.
 - Before: unresolved; called once during init, returning NOT_FOUND.
 - After: resolved. Returns seconds since the Unix epoch (using the same wall clock
@@ -183,3 +183,45 @@ left for a supervised decision. Continuing with low-risk runtime-hit imports.
 - Next observed blocker: the existing `fopen` HLE (xeYO4u7uyJ0) throws a host
   ArgumentException during init because it receives an empty path string — a real
   robustness bug flagged in the task. Investigating next.
+
+### M9 — fopen/freopen: empty resolved path is ENOENT, not a host crash
+
+- Commit: (this milestone)
+- API: `fopen` (xeYO4u7uyJ0), `freopen` — existing exports, corrected. Bug fix,
+  not new NIDs.
+- Root cause (source + runtime trace, no binary analysis): the .NET NativeAOT
+  runtime probes Linux-only paths during init — `/proc/self/mountinfo`,
+  `/sys/devices/system/cpu/cpu0/cache/index*/size` (CPU cache detection). These
+  have no PS5 mount, so `ResolveGuestPath` returns "" (it also returns "" for a
+  denied mount and for empty input). `new FileStream("")` throws an
+  ArgumentException, which is not IOException and so escaped the catch as a host
+  `HLE dispatch error`.
+- Fix: treat an empty/whitespace resolved host path as ENOENT and return NULL, as
+  the C library does for `fopen("", ...)` and for a nonexistent file; also broaden
+  the fopen/freopen catch to ArgumentException/NotSupportedException so no other
+  malformed path can crash the host. Not ProsperoGame-specific.
+- Before: 8+ `HLE dispatch error for xeYO4u7uyJ0: ArgumentException` per run.
+- After: 0 dispatch errors of any kind; the runtime gets NULL and falls back to
+  defaults for the probed values. Target runs its frame loop with zero unresolved
+  imports and zero dispatch errors (submitted_fps ~16).
+- Scanner after: SharpEmu 122, Missing 22, Data miss 3, Blockers 0 (unchanged —
+  bug fix).
+- Regression: `tests/SharpEmu.Libs.Tests/Libc/LibcStdioFopenTests.cs` (fopen/
+  freopen empty and whitespace path -> NOT_FOUND, no throw, NULL FILE*).
+- Managed suite: 930 passed, 0 failed.
+
+## Current state / remaining work
+
+The target runs its application frame loop cleanly: zero unresolved imports, zero
+HLE dispatch errors, both framebuffers flipping every frame at ~16 submitted fps.
+
+The one remaining gap to a visible frame is architecture-gated and left for a
+supervised decision: frames present black (`vk.present_dropped ... hasPixels=False
+version=0`). SharpProspero draws on the CPU into a tiled scan-out direct-memory
+buffer (`AgcTiler.Tile`), and the Vulkan present path does not surface those
+CPU-written tiled scan-out buffers to the swapchain. Wiring that up is AGC/GPU
+scan-out architecture (out of scope for the unattended pass).
+
+Data imports: scanner still reports 3 unresolved-data candidates (Need_sceLibc,
+_Stderr, _Stdout); runtime shows no data-import faults and execution does not
+depend on them, so they are left as-is per the task guidance.
