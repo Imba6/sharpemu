@@ -16,6 +16,81 @@ public static class AudioOutExports
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
     private static int _nextPortHandle;
 
+    // Env-gated diagnostic (SHARPEMU_PROFILE_AUDIO=1, default off). Proves the
+    // guest submission pipeline is live and whether the submitted PCM is silent
+    // vs carrying real mixed output (peak amplitude). Throttled to one summary
+    // per second; never logs per call. Mirrors the stdio profiler's policy.
+    private static readonly bool _profileAudio =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_AUDIO"),
+            "1",
+            StringComparison.Ordinal);
+    private static long _profOutputCalls;
+    private static long _profSilentCalls;
+    private static int _profPeakAmplitude;
+    private static long _profFramesSubmitted;
+    private static Timer? _profTimer;
+    private static readonly object _profGate = new();
+
+    private static void ProfileSubmission(ReadOnlySpan<byte> stereoPcm16)
+    {
+        Interlocked.Increment(ref _profOutputCalls);
+        Interlocked.Add(ref _profFramesSubmitted, stereoPcm16.Length / StereoPcm16FrameSize);
+
+        var peak = 0;
+        for (var offset = 0; offset + 1 < stereoPcm16.Length; offset += 2)
+        {
+            var sample = (short)(stereoPcm16[offset] | (stereoPcm16[offset + 1] << 8));
+            var magnitude = sample == short.MinValue ? short.MaxValue : Math.Abs(sample);
+            if (magnitude > peak)
+            {
+                peak = magnitude;
+            }
+        }
+
+        if (peak == 0)
+        {
+            Interlocked.Increment(ref _profSilentCalls);
+        }
+
+        int seen;
+        do
+        {
+            seen = Volatile.Read(ref _profPeakAmplitude);
+            if (peak <= seen)
+            {
+                break;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _profPeakAmplitude, peak, seen) != seen);
+
+        EnsureProfileTimer();
+    }
+
+    private static void EnsureProfileTimer()
+    {
+        if (_profTimer is not null)
+        {
+            return;
+        }
+
+        lock (_profGate)
+        {
+            _profTimer ??= new Timer(_ => DumpProfile(), null, 1000, 1000);
+        }
+    }
+
+    private static void DumpProfile()
+    {
+        var calls = Interlocked.Read(ref _profOutputCalls);
+        var silent = Interlocked.Read(ref _profSilentCalls);
+        var frames = Interlocked.Read(ref _profFramesSubmitted);
+        var peak = Interlocked.Exchange(ref _profPeakAmplitude, 0);
+        Console.Error.WriteLine(
+            $"[VPS5][AUDIO-PROFILE] output_calls={calls} silent_calls={silent} " +
+            $"frames={frames} peak_since_last={peak}");
+    }
+
     private sealed class PortState : IDisposable
     {
         private readonly object _paceGate = new();
@@ -141,6 +216,11 @@ public static class AudioOutExports
             if (!ctx.Memory.TryRead(sourceAddress, pcm))
             {
                 return ctx.SetReturn(AudioOutErrorInvalidPointer);
+            }
+
+            if (_profileAudio)
+            {
+                ProfileSubmission(pcm);
             }
 
             if (port.Backend is null || !port.Backend.Submit(pcm))
