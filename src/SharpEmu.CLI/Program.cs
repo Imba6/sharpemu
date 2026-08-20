@@ -14,6 +14,8 @@ using System.Text;
 using System.Text.Json;
 using VirtualPS5.HLE;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("SharpEmu.CLI.Tests")]
+
 namespace SharpEmu.CLI;
 
 internal static partial class Program
@@ -31,6 +33,7 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const string MitigationReadyEnvironment = "SHARPEMU_MITIGATION_READY_FILE";
     private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
@@ -236,6 +239,15 @@ internal static partial class Program
     private static int RunEmulator(string[] args, bool isMitigatedChild)
     {
         Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
+
+        // Reaching managed code proves the mitigated-child relaunch actually
+        // produced a live process; signal the parent so it treats this run's
+        // exit code as meaningful instead of falling back to in-process
+        // execution. See TryRunMitigatedChild for the failure this guards.
+        if (isMitigatedChild)
+        {
+            SignalMitigatedChildStarted();
+        }
 
         if (!isMitigatedChild && TryRunMitigatedChild(args, out var childExitCode))
         {
@@ -541,12 +553,48 @@ internal static partial class Program
             return false;
         }
 
+        // The relaunch uses CreateProcessW with the process image and the
+        // current directory passed through as-is. When either is a UNC path —
+        // overwhelmingly `dotnet run` against a \\wsl.localhost\... working
+        // copy — that relaunch is unreliable: Windows does not support a UNC
+        // working directory for a new process, and the parent is torn down
+        // during CreateProcessW before the child ever reaches managed code.
+        // The result is the silent failure this guard prevents: one
+        // "[DEBUG] SharpEmu starting" line, no window, no guest, exit 0.
+        // Skip the hardening and run the guest in this process instead, the
+        // same model Linux/macOS already use. Installed builds launched from a
+        // local drive are unaffected and still get the CET/CFG mitigation.
+        if (IsUncPath(processPath) || IsUncPath(Environment.CurrentDirectory))
+        {
+            Console.Error.WriteLine(
+                "[LOADER][WARN] Skipping the CET/CFG mitigation relaunch: SharpEmu is " +
+                "running from a UNC path (e.g. 'dotnet run' from \\\\wsl.localhost), where " +
+                "the relaunch cannot start. Running in-process without CET/CFG mitigation.");
+            return false;
+        }
+
         string[] childArgs = [MitigatedChildFlag, .. args];
 
         var commandLine = BuildCommandLine(processPath, childArgs);
         var startupInfoEx = new STARTUPINFOEX();
         startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
         ConfigureInheritedStdHandles(ref startupInfoEx.StartupInfo);
+
+        // Readiness handshake: the child creates this file the moment it
+        // reaches managed code (SignalMitigatedChildStarted). The UNC guard
+        // above already turns away the worst offender, but relaunching a
+        // framework-dependent apphost through CreateProcessW under the
+        // CET/CFG-disabling mitigation policy can still fail on a local drive
+        // if the child dies during host/runtime initialization before Main.
+        // Without this handshake the parent would return that dead child's
+        // meaningless exit code (often 0) and the guest would never run — a
+        // silent, log-less exit. If the file never appears we fall back to
+        // running the guest in this process instead.
+        var readyFilePath = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-mitigation-ready-{Environment.ProcessId}-{Guid.NewGuid():N}.tmp");
+        TryDeleteFile(readyFilePath);
+        var previousReadyEnvironment = Environment.GetEnvironmentVariable(MitigationReadyEnvironment);
 
         nint attributeList = 0;
         nint mitigationPolicies = 0;
@@ -591,6 +639,7 @@ internal static partial class Program
             var cmdLineBuilder = new StringBuilder(commandLine);
             nint jobHandle = 0;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+            Environment.SetEnvironmentVariable(MitigationReadyEnvironment, readyFilePath);
             var created = CreateProcessW(
                 null,
                 cmdLineBuilder,
@@ -603,6 +652,7 @@ internal static partial class Program
                 ref startupInfoEx,
                 out var processInfo);
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            Environment.SetEnvironmentVariable(MitigationReadyEnvironment, previousReadyEnvironment);
             if (!created)
             {
                 childExitCode = 5;
@@ -644,6 +694,21 @@ internal static partial class Program
                     return false;
                 }
 
+                // The child exited without ever reaching managed code: the
+                // mitigated relaunch is broken in this environment. Do not
+                // pass its exit code off as the emulation result — fall back
+                // to running the guest in this process (returning false makes
+                // RunEmulator continue past the relaunch).
+                if (!File.Exists(readyFilePath))
+                {
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Mitigated child process exited without starting " +
+                        $"(exit 0x{exitCode:X8}); the CET/CFG relaunch is unavailable here " +
+                        "(common under 'dotnet run' from a \\\\wsl.localhost path). " +
+                        "Falling back to in-process execution without CET/CFG mitigation.");
+                    return false;
+                }
+
                 childExitCode = unchecked((int)exitCode);
                 Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
                 return true;
@@ -662,6 +727,8 @@ internal static partial class Program
         finally
         {
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            Environment.SetEnvironmentVariable(MitigationReadyEnvironment, previousReadyEnvironment);
+            TryDeleteFile(readyFilePath);
 
             if (attributeList != 0)
             {
@@ -674,6 +741,58 @@ internal static partial class Program
                 Marshal.FreeHGlobal(mitigationPolicies);
             }
         }
+    }
+
+    /// <summary>
+    /// Called by a mitigated child once it reaches managed code, creating the
+    /// handshake file the parent named in <see cref="MitigationReadyEnvironment"/>.
+    /// Its presence tells the parent the relaunch produced a live process, so
+    /// the child's exit code is meaningful; its absence makes the parent fall
+    /// back to in-process execution. Never throws — a failed signal only costs
+    /// the (functional) in-process fallback.
+    /// </summary>
+    private static void SignalMitigatedChildStarted()
+    {
+        var readyFilePath = Environment.GetEnvironmentVariable(MitigationReadyEnvironment);
+        if (string.IsNullOrEmpty(readyFilePath))
+        {
+            return;
+        }
+
+        try
+        {
+            File.WriteAllText(readyFilePath, "1");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Could not write mitigation readiness file: {exception.Message}");
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // Best effort: a leftover temp file is harmless.
+        }
+    }
+
+    /// <summary>
+    /// A UNC path (\\server\share\… or the //server/share form). Process
+    /// creation with a UNC working directory is unsupported on Windows, so the
+    /// mitigation relaunch is skipped for such paths.
+    /// </summary>
+    internal static bool IsUncPath(string? path)
+    {
+        return !string.IsNullOrEmpty(path)
+            && path.Length >= 2
+            && (path[0] == '\\' || path[0] == '/')
+            && (path[1] == '\\' || path[1] == '/');
     }
 
     private static bool TryGetLogFileArgument(IReadOnlyList<string> args, out string path)
