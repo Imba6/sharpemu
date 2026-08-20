@@ -49,4 +49,18 @@ public sealed class SysAbiRegistryTests
         Assert.Equal("sceKernelWaitSema", export.Name);
         Assert.Equal("libKernel", export.LibraryName);
     }
+
+    // Regression: 15-in-1 Solitaire's libc.prx C++ unwinder imports the
+    // libSceSysmodule alias of GetModuleInfoForUnwind (NID 4fU5yvOkVG4), which was
+    // previously unresolved. It shares the libKernel handler's core.
+    [Fact]
+    public void RegistryResolvesSysmoduleGetModuleInfoForUnwind()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
+
+        Assert.True(manager.TryGetExport("4fU5yvOkVG4", out var export));
+        Assert.Equal("sceSysmoduleGetModuleInfoForUnwind", export.Name);
+        Assert.Equal("libSceSysmodule", export.LibraryName);
+    }
 }

@@ -1023,6 +1023,26 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetModuleInfoForUnwind(CpuContext ctx)
     {
+        return GetModuleInfoForUnwindCore(ctx);
+    }
+
+    // libSceSysmodule re-exports the same libc++abi/libunwind entry point that
+    // libKernel provides: (uintptr_t addr, int flags, SceModuleInfoForUnwind*
+    // info). PS5 CRTs import whichever the toolchain linked; this game's
+    // libc.prx unwinder imports the Sysmodule NID. Both share one core so the
+    // behaviour is identical regardless of which library the guest picked.
+    [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx)
+    {
+        return GetModuleInfoForUnwindCore(ctx);
+    }
+
+    private static int GetModuleInfoForUnwindCore(CpuContext ctx)
+    {
         var queriedAddress = ctx[CpuRegister.Rdi];
         var flags = unchecked((int)ctx[CpuRegister.Rsi]);
         var outInfoAddress = ctx[CpuRegister.Rdx];
