@@ -183,7 +183,64 @@ public sealed class AudioOutExportsTests : IDisposable
         }
     }
 
+    // Regression for the Dreaming Sarah (PPSA02929) silent-audio bug. Sarah opens
+    // its AudioOut port with the real PS5 SCE_AUDIO_OUT_PARAM_FORMAT_FLOAT_STEREO
+    // (4), 48 kHz, 256-frame grain. The previously-active legacy handler only
+    // accepted format 0, so the open was rejected with INVALID_ARGUMENT and no port
+    // (hence no audio). The authoritative handler must accept the whole PS5 format
+    // table.
+    [Theory]
+    [InlineData(0)] // S16_MONO
+    [InlineData(1)] // S16_STEREO
+    [InlineData(2)] // S16_8CH
+    [InlineData(3)] // FLOAT_MONO
+    [InlineData(4)] // FLOAT_STEREO (Dreaming Sarah)
+    [InlineData(5)] // FLOAT_8CH
+    [InlineData(6)] // S16_8CH_STD
+    [InlineData(7)] // FLOAT_8CH_STD
+    public void Open_AcceptsEveryPs5AudioFormat(int format)
+    {
+        var handle = OpenPortWithFormat(bufferLength: 256, format: format);
+        Assert.True(handle > 0, $"PS5 audio format {format} must be accepted");
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(99)]
+    [InlineData(0xFF)]
+    public void Open_RejectsUnknownFormat(int format)
+    {
+        var handle = OpenPortWithFormat(bufferLength: 256, format: format);
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, handle);
+    }
+
+    [Fact]
+    public void Open_AcceptsDreamingSarahFloatStereoRequest()
+    {
+        // Exact runtime arguments observed from Dreaming Sarah's AudioOutThread.
+        _ctx[CpuRegister.Rdi] = 255;   // userId
+        _ctx[CpuRegister.Rsi] = 0;     // type = MAIN
+        _ctx[CpuRegister.Rdx] = 0;     // index
+        _ctx[CpuRegister.Rcx] = 256;   // len (frames)
+        _ctx[CpuRegister.R8] = 48000;  // freq
+        _ctx[CpuRegister.R9] = 4;      // FLOAT_STEREO
+        var handle = AudioOutExports.AudioOutOpen(_ctx);
+        Assert.True(handle > 0);
+    }
+
     public void Dispose() => AudioOutExports.ResetForTests();
+
+    private int OpenPortWithFormat(uint bufferLength, int format)
+    {
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = bufferLength;
+        _ctx[CpuRegister.R8] = 48000;
+        _ctx[CpuRegister.R9] = unchecked((ulong)(uint)format);
+        return AudioOutExports.AudioOutOpen(_ctx);
+    }
 
     private int OpenPort(uint bufferLength)
     {
