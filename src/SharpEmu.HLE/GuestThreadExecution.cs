@@ -116,6 +116,22 @@ public interface IGuestThreadScheduler
         ulong handler,
         int exceptionType,
         out string? error);
+
+    /// <summary>
+    /// Delivers any guest exception already queued for <paramref name="threadHandle"/>
+    /// by running its handler on the CURRENT host thread, using
+    /// <paramref name="targetContext"/> as the interrupted CPU state. This is the
+    /// symmetric counterpart to <see cref="TryRaiseGuestException"/> for a thread that
+    /// is parked on a host Monitor inside a blocking kernel call: the parked thread's
+    /// own host thread services the queued signal. <paramref name="delivered"/> reports
+    /// whether a handler actually ran (false when nothing was queued for the thread).
+    /// The call itself returns false only on a hard delivery failure.
+    /// </summary>
+    bool TryDeliverQueuedGuestException(
+        CpuContext targetContext,
+        ulong threadHandle,
+        out bool delivered,
+        out string? error);
 }
 
 public readonly record struct GuestImportCallFrame(
@@ -166,6 +182,188 @@ public static class GuestThreadExecution
         public int Resume() => _resume();
 
         public bool TryWake() => _tryWake();
+    }
+
+    // ---------------------------------------------------------------------
+    // Host-park interrupt.
+    //
+    // A guest thread that is not a cooperative executor (the primary/external
+    // executor, or any caller with no resumable CPU continuation) blocks inside
+    // a kernel wait by parking its own host thread on a Monitor. A guest
+    // exception raised against such a thread by another thread (IL2CPP's
+    // stop-the-world collector does exactly this) must be delivered on that
+    // thread's own host thread, which only surfaces when the park wakes. This
+    // registry lets the raising thread wake a specific host park so its wait
+    // loop re-evaluates pending guest state. The wake never satisfies the guest
+    // wait condition; the loop must re-check its own predicate and re-park when
+    // nothing else has changed.
+    // ---------------------------------------------------------------------
+
+    internal sealed class HostParkRegistration
+    {
+        public required ulong ThreadHandle { get; init; }
+
+        public required object Gate { get; init; }
+
+        // Guarded by Gate.
+        public bool InterruptPending;
+
+        // Guarded by _hostParkRegistryGate; supports nested parks on one thread.
+        public HostParkRegistration? Previous;
+    }
+
+    private static readonly Dictionary<ulong, HostParkRegistration> _hostParkRegistry = new();
+    private static readonly object _hostParkRegistryGate = new();
+
+    /// <summary>
+    /// Registers the calling host thread as parked on <paramref name="gate"/> (the
+    /// same Monitor its wait loop blocks on) under <paramref name="threadHandle"/>,
+    /// so a queued guest exception can interrupt the park. Dispose the returned
+    /// scope when the wait loop exits. Nested parks on one thread are stacked and
+    /// restored on dispose. A zero handle registers nothing (still returns a
+    /// disposable no-op scope).
+    /// </summary>
+    public static HostParkScope EnterInterruptibleHostPark(ulong threadHandle, object gate)
+    {
+        ArgumentNullException.ThrowIfNull(gate);
+        var registration = new HostParkRegistration
+        {
+            ThreadHandle = threadHandle,
+            Gate = gate,
+        };
+        if (threadHandle != 0)
+        {
+            lock (_hostParkRegistryGate)
+            {
+                _hostParkRegistry.TryGetValue(threadHandle, out var previous);
+                registration.Previous = previous;
+                _hostParkRegistry[threadHandle] = registration;
+            }
+        }
+
+        return new HostParkScope(registration);
+    }
+
+    /// <summary>
+    /// Wakes the host thread parked under <paramref name="threadHandle"/> so its
+    /// wait loop re-evaluates pending guest state (for example a just-queued kernel
+    /// exception). This only pulses the park Monitor; it never records progress on
+    /// the guest synchronization object, so the loop stays blocked unless its own
+    /// predicate is independently satisfied.
+    /// </summary>
+    public static void InterruptHostPark(ulong threadHandle)
+    {
+        if (threadHandle == 0)
+        {
+            return;
+        }
+
+        HostParkRegistration? registration;
+        lock (_hostParkRegistryGate)
+        {
+            _hostParkRegistry.TryGetValue(threadHandle, out registration);
+        }
+
+        if (registration is null)
+        {
+            return;
+        }
+
+        lock (registration.Gate)
+        {
+            registration.InterruptPending = true;
+            Monitor.PulseAll(registration.Gate);
+        }
+    }
+
+    /// <summary>
+    /// Runs any guest exception queued for <paramref name="threadHandle"/> on the
+    /// current host thread, using <paramref name="context"/> as the interrupted
+    /// thread's CPU state. Call this after a host park wakes and its guest predicate
+    /// is still unsatisfied, with the park gate released. Returns true if a handler
+    /// ran.
+    /// </summary>
+    public static bool TryDeliverParkedGuestException(CpuContext context, ulong threadHandle)
+    {
+        var scheduler = Scheduler;
+        if (scheduler is null || threadHandle == 0)
+        {
+            return false;
+        }
+
+        return scheduler.TryDeliverQueuedGuestException(context, threadHandle, out var delivered, out _) &&
+            delivered;
+    }
+
+    /// <summary>
+    /// Releases <paramref name="gate"/> (which the caller currently holds), delivers
+    /// any queued guest exception for <paramref name="threadHandle"/> on this host
+    /// thread, then re-acquires <paramref name="gate"/>. The gate is released around
+    /// delivery because the guest handler may re-enter kernel synchronization that
+    /// takes the same gate.
+    /// </summary>
+    public static void ServiceHostParkInterrupt(object gate, CpuContext context, ulong threadHandle)
+    {
+        ArgumentNullException.ThrowIfNull(gate);
+        Monitor.Exit(gate);
+        try
+        {
+            TryDeliverParkedGuestException(context, threadHandle);
+        }
+        finally
+        {
+            Monitor.Enter(gate);
+        }
+    }
+
+    /// <summary>Scope returned by <see cref="EnterInterruptibleHostPark"/>.</summary>
+    public readonly struct HostParkScope : IDisposable
+    {
+        private readonly HostParkRegistration? _registration;
+
+        internal HostParkScope(HostParkRegistration registration) => _registration = registration;
+
+        /// <summary>
+        /// Consumes and clears a pending interrupt flag. Must be called while holding
+        /// the park gate. Returns true when an interrupt was pending, in which case
+        /// the loop should service it and re-check its predicate before re-parking.
+        /// </summary>
+        public bool ConsumeInterrupt()
+        {
+            var registration = _registration;
+            if (registration is null || !registration.InterruptPending)
+            {
+                return false;
+            }
+
+            registration.InterruptPending = false;
+            return true;
+        }
+
+        public void Dispose()
+        {
+            var registration = _registration;
+            if (registration is null || registration.ThreadHandle == 0)
+            {
+                return;
+            }
+
+            lock (_hostParkRegistryGate)
+            {
+                if (_hostParkRegistry.TryGetValue(registration.ThreadHandle, out var current) &&
+                    ReferenceEquals(current, registration))
+                {
+                    if (registration.Previous is null)
+                    {
+                        _hostParkRegistry.Remove(registration.ThreadHandle);
+                    }
+                    else
+                    {
+                        _hostParkRegistry[registration.ThreadHandle] = registration.Previous;
+                    }
+                }
+            }
+        }
     }
 
     [ThreadStatic]

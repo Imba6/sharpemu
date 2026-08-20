@@ -4715,6 +4715,89 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
+	private enum ExternalRaiseOutcome
+	{
+		/// <summary>The target is a scheduled guest thread; caller handles it.</summary>
+		NotExternal,
+
+		/// <summary>The signal was queued for a registered external thread.</summary>
+		Queued,
+
+		/// <summary>The target is external but the request could not be prepared.</summary>
+		Failed,
+	}
+
+	/// <summary>
+	/// Queues a guest exception for a registered external (host-parked) thread. The
+	/// caller wakes the thread's host park after a <see cref="ExternalRaiseOutcome.Queued"/>
+	/// result so the signal is delivered on the thread's own host thread. Returns
+	/// <see cref="ExternalRaiseOutcome.NotExternal"/> when the target is a scheduled
+	/// guest thread, which the cooperative delivery path in
+	/// <see cref="TryRaiseGuestException"/> handles instead.
+	/// </summary>
+	private ExternalRaiseOutcome TryQueueExternalGuestException(
+		ulong threadHandle,
+		ulong handler,
+		int exceptionType,
+		bool logGuestExceptions,
+		out string? error)
+	{
+		error = null;
+		lock (_guestThreadGate)
+		{
+			if (_guestThreads.ContainsKey(threadHandle))
+			{
+				return ExternalRaiseOutcome.NotExternal;
+			}
+
+			if (!_externalGuestThreads.TryGetValue(threadHandle, out var external))
+			{
+				error = $"unknown guest exception target 0x{threadHandle:X16}";
+				return ExternalRaiseOutcome.Failed;
+			}
+
+			if (external.ExceptionStackBase == 0)
+			{
+				string? mapError = null;
+				if (!TryGetVirtualMemory(external.Context, out var virtualMemory) ||
+					!TryMapGuestThreadRegion(
+						virtualMemory,
+						GuestThreadStackBaseAddress,
+						GuestThreadStackSize,
+						ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
+						out var stackBase,
+						out mapError))
+				{
+					error = mapError ?? "external guest context has no virtual memory";
+					return ExternalRaiseOutcome.Failed;
+				}
+
+				external.ExceptionStackBase = stackBase;
+			}
+
+			// Queue unless a signal is already pending for this thread. A delivery
+			// still in flight (_activeGuestExceptionDeliveries) also queues so the
+			// collector's next stop-the-world cycle is not lost while the previous
+			// handler unwinds.
+			if (!_pendingGuestExceptions.ContainsKey(threadHandle))
+			{
+				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
+					handler,
+					exceptionType,
+					external.ExceptionStackBase));
+			}
+
+			if (logGuestExceptions)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] guest_exception.queued " +
+					$"target=0x{threadHandle:X16} type=0x{exceptionType:X2} mode=external");
+			}
+
+			return ExternalRaiseOutcome.Queued;
+		}
+	}
+
 	public bool TryRaiseGuestException(
 		CpuContext callerContext,
 		ulong threadHandle,
@@ -4733,6 +4816,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
+		// External/host-parked targets (the primary executor, or any thread blocked
+		// on a host Monitor without a resumable continuation) cannot have their
+		// handler run on a fresh managed thread. Queue the signal and wake the
+		// target's host park so it delivers on its own host thread. Cooperative
+		// (scheduled) targets fall through to the parked-continuation path below.
+		switch (TryQueueExternalGuestException(threadHandle, handler, exceptionType, logGuestExceptions, out error))
+		{
+			case ExternalRaiseOutcome.Failed:
+				return false;
+			case ExternalRaiseOutcome.Queued:
+				GuestThreadExecution.InterruptHostPark(threadHandle);
+				return true;
+			case ExternalRaiseOutcome.NotExternal:
+			default:
+				break;
+		}
+
 		GuestThreadState target;
 		GuestThreadRunState savedState;
 		bool savedExecutorActive;
@@ -4747,64 +4847,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			if (!_guestThreads.TryGetValue(threadHandle, out target!))
 			{
-				if (!_externalGuestThreads.TryGetValue(threadHandle, out var external))
-				{
-					error = $"unknown guest exception target 0x{threadHandle:X16}";
-					return false;
-				}
-
-				if (external.ExceptionStackBase == 0)
-				{
-					string? mapError = null;
-					if (!TryGetVirtualMemory(external.Context, out var virtualMemory) ||
-						!TryMapGuestThreadRegion(
-							virtualMemory,
-							GuestThreadStackBaseAddress,
-							GuestThreadStackSize,
-							ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
-							out var stackBase,
-							out mapError))
-					{
-						error = mapError ?? "external guest context has no virtual memory";
-						return false;
-					}
-
-					external.ExceptionStackBase = stackBase;
-				}
-
-				if (_pendingGuestExceptions.ContainsKey(threadHandle))
-				{
-					return true;
-				}
-				if (_activeGuestExceptionDeliveries.Contains(threadHandle))
-				{
-					// Preserve one signal raised while the previous handler is
-					// unwinding. Unity can begin its next stop-the-world cycle in
-					// that window; treating the new raise as part of the old delivery
-					// strands the collector waiting for an acknowledgement.
-					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
-						handler,
-						exceptionType,
-						external.ExceptionStackBase));
-					return true;
-				}
-
-				// A primary/external executor is already running guest code on its
-				// own host thread. Running its signal handler concurrently on a new
-				// managed thread corrupts the worker's control state. Queue the
-				// request and let that exact executor consume it at its next HLE
-				// boundary, where the original guest thread is safely paused.
-				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
-					handler,
-					exceptionType,
-					external.ExceptionStackBase));
-				if (logGuestExceptions)
-				{
-					Console.Error.WriteLine(
-						$"[LOADER][TRACE] guest_exception.queued " +
-						$"target=0x{threadHandle:X16} type=0x{exceptionType:X2} mode=external");
-				}
-				return true;
+				// External targets were handled above; a miss here means the thread
+				// is neither a scheduled nor a registered external guest thread.
+				error = $"unknown guest exception target 0x{threadHandle:X16}";
+				return false;
 			}
 
 			if (target.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted)
@@ -5169,6 +5215,104 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					$"target=0x{threadHandle:X16} type=0x{pending.ExceptionType:X2} " +
 					$"error={callbackError ?? "unknown"}");
 			}
+		}
+		finally
+		{
+			lock (_guestThreadGate)
+			{
+				_activeGuestExceptionDeliveries.Remove(threadHandle);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Delivers a queued guest exception for <paramref name="threadHandle"/> on the
+	/// CURRENT host thread. Used by a host-parked kernel wait (see
+	/// GuestThreadExecution.ServiceHostParkInterrupt) so a thread suspended by
+	/// IL2CPP's collector runs its own signal handler on its own host thread instead
+	/// of waiting for an HLE boundary that a parked thread never reaches. Mirrors
+	/// <see cref="DeliverPendingGuestExceptionAtSafePoint"/> but is driven by the
+	/// target thread rather than by an import return, and captures the interrupted
+	/// register state directly from <paramref name="targetContext"/>.
+	/// </summary>
+	public bool TryDeliverQueuedGuestException(
+		CpuContext targetContext,
+		ulong threadHandle,
+		out bool delivered,
+		out string? error)
+	{
+		delivered = false;
+		error = null;
+		if (threadHandle == 0 || Volatile.Read(ref _pendingGuestExceptionCount) == 0)
+		{
+			return true;
+		}
+
+		PendingGuestException pending;
+		lock (_guestThreadGate)
+		{
+			// A delivery already in flight for this thread (this or a nested call)
+			// owns the queued signal; leave it queued for that delivery to drain.
+			if (_activeGuestExceptionDeliveries.Contains(threadHandle))
+			{
+				return true;
+			}
+
+			if (!TryRemovePendingGuestExceptionLocked(threadHandle, out pending))
+			{
+				return true;
+			}
+
+			_activeGuestExceptionDeliveries.Add(threadHandle);
+		}
+
+		const ulong exceptionContextSize = 0x500;
+		const ulong callbackStackOffset = 0x1000;
+		const ulong callbackStackSize = 0xF000;
+		var exceptionContextAddress = pending.ExceptionStackBase + 0x100;
+		try
+		{
+			// No cooperative continuation exists for a host-parked thread, so the
+			// interrupted register snapshot is read live from targetContext (the
+			// default continuation makes TryWriteGuestExceptionContext fall back to
+			// the context registers).
+			if (!TryWriteGuestExceptionContext(
+					targetContext,
+					exceptionContextAddress,
+					default,
+					exceptionContextSize))
+			{
+				error = $"host-park exception context write failed for 0x{threadHandle:X16}";
+				return false;
+			}
+
+			if (string.Equals(
+					Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_EXCEPTIONS"),
+					"1",
+					StringComparison.Ordinal))
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] guest_exception.host_park_deliver " +
+					$"target=0x{threadHandle:X16} type=0x{pending.ExceptionType:X2} " +
+					$"handler=0x{pending.Handler:X16}");
+			}
+
+			if (!TryCallGuestFunction(
+					targetContext,
+					pending.Handler,
+					unchecked((ulong)pending.ExceptionType),
+					exceptionContextAddress,
+					pending.ExceptionStackBase + callbackStackOffset,
+					callbackStackSize,
+					$"kernel exception 0x{pending.ExceptionType:X2} host park",
+					out var callbackError))
+			{
+				error = callbackError ?? $"host-park exception delivery failed for 0x{threadHandle:X16}";
+				return false;
+			}
+
+			delivered = true;
+			return true;
 		}
 		finally
 		{

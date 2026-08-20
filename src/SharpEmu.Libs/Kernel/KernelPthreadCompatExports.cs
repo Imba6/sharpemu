@@ -1764,25 +1764,42 @@ public static class KernelPthreadCompatExports
 
         // Non-guest callers have no resumable CPU continuation. Park only
         // those host-side compatibility callers, preserving the same FIFO
-        // mutex reacquisition rules as cooperative guest waiters.
-        lock (state.SyncRoot)
+        // mutex reacquisition rules as cooperative guest waiters. The park is
+        // interruptible so a guest exception raised against this thread (IL2CPP's
+        // stop-the-world collector) is delivered on its own host thread instead of
+        // waiting for an HLE boundary a parked thread never reaches.
+        using (var park = GuestThreadExecution.EnterInterruptibleHostPark(currentThreadId, state.SyncRoot))
         {
-            var deadline = timed
-                ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
-                : long.MaxValue;
-            while (waiter.CompletionState == 0)
+            lock (state.SyncRoot)
             {
-                if (!timed)
+                var deadline = timed
+                    ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
+                    : long.MaxValue;
+                while (waiter.CompletionState == 0)
                 {
-                    Monitor.Wait(state.SyncRoot);
-                    continue;
-                }
+                    // Service a queued guest exception before (re-)parking. Checked
+                    // under SyncRoot, the same gate the interrupt is raised under, so
+                    // a signal queued between registration and Monitor.Wait is not
+                    // lost. Delivery never satisfies the cond wait, so the loop
+                    // re-checks CompletionState and re-parks if still unsignaled.
+                    if (park.ConsumeInterrupt())
+                    {
+                        GuestThreadExecution.ServiceHostParkInterrupt(state.SyncRoot, ctx, currentThreadId);
+                        continue;
+                    }
 
-                var remaining = GetRemainingTimeout(deadline);
-                if (remaining <= TimeSpan.Zero || !Monitor.Wait(state.SyncRoot, remaining))
-                {
-                    CompleteCondWaiterLocked(state, waiter, timedOut: true);
-                    break;
+                    if (!timed)
+                    {
+                        Monitor.Wait(state.SyncRoot);
+                        continue;
+                    }
+
+                    var remaining = GetRemainingTimeout(deadline);
+                    if (remaining <= TimeSpan.Zero || !Monitor.Wait(state.SyncRoot, remaining))
+                    {
+                        CompleteCondWaiterLocked(state, waiter, timedOut: true);
+                        break;
+                    }
                 }
             }
         }

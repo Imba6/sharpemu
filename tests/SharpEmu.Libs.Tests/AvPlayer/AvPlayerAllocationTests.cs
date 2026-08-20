@@ -138,5 +138,16 @@ public sealed class AvPlayerAllocationTests : IDisposable
             error = "not supported";
             return false;
         }
+
+        public bool TryDeliverQueuedGuestException(
+            CpuContext targetContext,
+            ulong threadHandle,
+            out bool delivered,
+            out string? error)
+        {
+            delivered = false;
+            error = "not supported";
+            return false;
+        }
     }
 }

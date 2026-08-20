@@ -305,10 +305,20 @@ public static class KernelEventFlagCompatExports
                 state.WaitingThreads++;
                 if (_traceEventFlag) TraceEventFlag($"wait-pump handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} ret=0x{returnRip:X16}");
                 var releaseWaiter = true;
+                // This host driver also delivers a guest exception raised against
+                // the driving thread (IL2CPP's collector) on its own host thread,
+                // without treating it as the event flag being set.
+                var eventFlagThreadHandle = KernelPthreadState.GetCurrentThreadHandle();
+                using var park = GuestThreadExecution.EnterInterruptibleHostPark(eventFlagThreadHandle, state.Gate);
                 try
                 {
                     while (true)
                     {
+                        if (park.ConsumeInterrupt())
+                        {
+                            GuestThreadExecution.ServiceHostParkInterrupt(state.Gate, ctx, eventFlagThreadHandle);
+                        }
+
                         Monitor.Exit(state.Gate);
                         try
                         {

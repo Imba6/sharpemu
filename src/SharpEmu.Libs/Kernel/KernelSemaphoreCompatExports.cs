@@ -235,40 +235,56 @@ public static class KernelSemaphoreCompatExports
         var deadlineMs = timeoutAddress != 0
             ? Environment.TickCount64 + Math.Max(1L, timeoutUsec / 1000L)
             : long.MaxValue;
-        lock (semaphore.Gate)
+        // The host park is interruptible so a guest exception raised against this
+        // thread (e.g. IL2CPP's collector resuming a suspended thread through the
+        // ResumeSemaphore) runs its handler on this host thread rather than
+        // stranding until an HLE boundary.
+        var threadHandle = KernelPthreadState.GetCurrentThreadHandle();
+        using (var park = GuestThreadExecution.EnterInterruptibleHostPark(threadHandle, semaphore.Gate))
         {
-            if (_traceSema)
+            lock (semaphore.Gate)
             {
-                TraceSemaphore(
-                    $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
-                    $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
-            }
-            while (semaphore.Count < needCount)
-            {
-                var remaining = deadlineMs - Environment.TickCount64;
-                if (timeoutAddress != 0 && remaining <= 0)
+                if (_traceSema)
                 {
-                    semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
-                    _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
+                    TraceSemaphore(
+                        $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
+                        $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
+                }
+                while (semaphore.Count < needCount)
+                {
+                    // Deliver a queued guest exception before (re-)parking, without
+                    // treating it as the semaphore being posted.
+                    if (park.ConsumeInterrupt())
+                    {
+                        GuestThreadExecution.ServiceHostParkInterrupt(semaphore.Gate, ctx, threadHandle);
+                        continue;
+                    }
+
+                    var remaining = deadlineMs - Environment.TickCount64;
+                    if (timeoutAddress != 0 && remaining <= 0)
+                    {
+                        semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
+                    }
+
+                    Monitor.Wait(semaphore.Gate, (int)Math.Min(remaining, 100));
                 }
 
-                Monitor.Wait(semaphore.Gate, (int)Math.Min(remaining, 100));
-            }
+                semaphore.Count -= needCount;
+                semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                if (_traceSema)
+                {
+                    TraceSemaphore(
+                        $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
+                }
+                if (timeoutAddress != 0)
+                {
+                    _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                }
 
-            semaphore.Count -= needCount;
-            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
-            if (_traceSema)
-            {
-                TraceSemaphore(
-                    $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
             }
-            if (timeoutAddress != 0)
-            {
-                _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-            }
-
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
         }
     }
 
