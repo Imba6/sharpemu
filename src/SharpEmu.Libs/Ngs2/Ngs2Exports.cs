@@ -843,6 +843,92 @@ public static class Ngs2Exports
         return SetReturn(ctx, 0);
     }
 
+    // SceNgs2VoicePortInfo (24 bytes): s32 matrixId; float volume;
+    // u32 numDelaySamples; u32 destInputId; SceNgs2Handle destHandle.
+    private const int VoicePortInfoSize = 0x18;
+
+    [SysAbiExport(
+        Nid = "WCayTgob7-o",
+        ExportName = "sceNgs2VoiceGetPortInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2VoiceGetPortInfo(CpuContext ctx)
+    {
+        // sceNgs2VoiceGetPortInfo(SceNgs2Handle voice, uint32_t port,
+        //                         SceNgs2VoicePortInfo* outInfo, size_t outInfoSize)
+        var voiceHandle = ctx[CpuRegister.Rdi];
+        var port = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var outInfoAddress = ctx[CpuRegister.Rdx];
+        var outInfoSize = ctx[CpuRegister.Rcx];
+
+        lock (StateGate)
+        {
+            if (!Voices.ContainsKey(voiceHandle))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
+            }
+        }
+
+        if (outInfoAddress == 0)
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidOutAddress);
+        }
+
+        // Our software mixer routes every voice straight to the master output and
+        // does not model per-voice port routing (matrix/delay/destination). Report
+        // a well-defined default port: matrix 0, unity volume, no delay, routed to
+        // input 0 of the implicit master (destHandle 0). Bound the write by the
+        // caller-supplied size so a smaller struct is never overrun.
+        Span<byte> info = stackalloc byte[VoicePortInfoSize];
+        info.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(info[0..4], 0);              // matrixId
+        BinaryPrimitives.WriteSingleLittleEndian(info[4..8], 1.0f);          // volume
+        BinaryPrimitives.WriteUInt32LittleEndian(info[8..12], 0);            // numDelaySamples
+        BinaryPrimitives.WriteUInt32LittleEndian(info[12..16], 0);          // destInputId
+        BinaryPrimitives.WriteUInt64LittleEndian(info[16..24], 0);           // destHandle
+
+        var writeLength = (int)Math.Min(outInfoSize, (ulong)VoicePortInfoSize);
+        if (writeLength > 0 && !ctx.Memory.TryWrite(outInfoAddress, info[..writeLength]))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (ShouldTrace())
+        {
+            Console.Error.WriteLine(
+                $"[NGS2] VoiceGetPortInfo voice=0x{voiceHandle:X} port={port} " +
+                $"out=0x{outInfoAddress:X} size={outInfoSize} -> ok");
+        }
+
+        return SetReturn(ctx, 0);
+    }
+
+    // Test seam: seed a voice (and a backing rack) directly so the voice-scoped
+    // getters can be exercised without standing up the guest virtual-memory
+    // allocator that sceNgs2RackGetVoiceHandle needs. Returns the voice handle.
+    internal static ulong SeedVoiceForTests(ulong voiceHandle)
+    {
+        lock (StateGate)
+        {
+            var rackHandle = voiceHandle ^ 0x1UL;
+            Racks[rackHandle] = new RackState(0, 0);
+            Voices[voiceHandle] = new VoiceState(rackHandle, 0);
+        }
+
+        return voiceHandle;
+    }
+
+    // Test seam: clear the process-global NGS2 state between tests.
+    internal static void ResetStateForTests()
+    {
+        lock (StateGate)
+        {
+            Systems.Clear();
+            Racks.Clear();
+            Voices.Clear();
+        }
+    }
+
     private static int ValidateSystem(CpuContext ctx)
     {
         lock (StateGate)
