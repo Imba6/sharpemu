@@ -19,7 +19,7 @@
 
 #define SAMPLE_RATE             48000u
 #define AUDIO_BUFFER_FRAMES     256u
-#define AUDIO_FORMAT_S16_STEREO 0
+#define AUDIO_FORMAT_S16_STEREO 1  /* PS5 S16_STEREO (0 is mono) */
 #define BEEP_HZ                 880u
 #define BEEP_AMPLITUDE          7000
 #define BEEP_BUFFER_COUNT       6

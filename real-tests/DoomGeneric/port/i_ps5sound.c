@@ -26,12 +26,13 @@
 #include "z_zone.h"
 
 // ---------------------------------------------------------------------------
-// PS5 audio ABI (resolved by VirtualPS5 HLE at runtime). The HLE contract:
-// format 0 = signed-16 stereo, frame = 4 bytes; sceAudioOutOutput reads
-// buffer_length*4 bytes from the guest-mapped buffer and blocks for pacing.
+// PS5 audio ABI (resolved by VirtualPS5 HLE at runtime). The HLE contract uses
+// the real PS5 SCE_AUDIO_OUT_PARAM_FORMAT values: 1 = signed-16 stereo (frame =
+// 4 bytes); sceAudioOutOutput reads buffer_length*4 bytes from the guest-mapped
+// buffer and blocks for pacing. (Format 0 is S16 MONO on PS5.)
 // ---------------------------------------------------------------------------
 #define AUDIO_USER_ID           0x10000000
-#define AUDIO_FORMAT_S16_STEREO 0
+#define AUDIO_FORMAT_S16_STEREO 1
 #define MIX_RATE                48000u   // output/mix sample rate (host-supported)
 #define MIX_FRAMES              256u     // frames per submit (~5.33 ms grain)
 
