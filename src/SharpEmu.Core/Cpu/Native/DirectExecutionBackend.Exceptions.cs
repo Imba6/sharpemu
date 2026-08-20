@@ -23,6 +23,20 @@ public sealed partial class DirectExecutionBackend
 	private nint _workerAbortStack;
 	private const uint WorkerAbortStackSize = 0x10000u;
 
+	// AV-loop detector (env-gated by SHARPEMU_LOG_JOIN_STALL). A guest fault that the
+	// VEH "recovers" (returns -1) but that immediately re-faults at the identical
+	// (rip, target) wedges the runtime: the thread spins fault->handler->resume->fault
+	// forever, never making import progress. Track the last fault per host thread and,
+	// once the same (rip, target) repeats past a threshold, dump it ONCE so the exact
+	// unrecoverable fault (address, access, region state, guest thread, last import) is
+	// captured without external debugging. Per-thread via [ThreadStatic]; managed TLS,
+	// so it is unaffected by the guest segment bases.
+	[ThreadStatic] private static ulong _avLoopLastTarget;
+	[ThreadStatic] private static ulong _avLoopLastRip;
+	[ThreadStatic] private static int _avLoopCount;
+	[ThreadStatic] private static bool _avLoopLogged;
+	private const int AvLoopReportThreshold = 4096;
+
 	private unsafe void SetupExceptionHandler()
 	{
 		if (!OperatingSystem.IsWindows())
@@ -123,6 +137,7 @@ public sealed partial class DirectExecutionBackend
 
 			ulong rip = ReadCtxU64(contextRecord, 248);
 			ulong rsp = ReadCtxU64(contextRecord, 152);
+			DetectAndReportAvLoop(exceptionRecord, exceptionCode, rip);
 			if (TryRecoverGuestInt41(exceptionCode, contextRecord, rip))
 			{
 				return -1;
@@ -448,6 +463,79 @@ public sealed partial class DirectExecutionBackend
 		{
 			_vectoredHandlerDepth--;
 		}
+	}
+
+	// Fires from VectoredHandler on every fault. If the identical (rip, faulting
+	// address) recurs past AvLoopReportThreshold on one host thread, the fault is
+	// being "recovered" and immediately retriggered — an unrecoverable AV loop that
+	// freezes the guest. Dump it once with the region state, active guest thread, and
+	// last import so the real cause is captured from a normal run (no debugger).
+	private unsafe void DetectAndReportAvLoop(EXCEPTION_RECORD* exceptionRecord, uint exceptionCode, ulong rip)
+	{
+		if (exceptionCode != 3221225477u || exceptionRecord->NumberParameters < 2)
+		{
+			// Only access violations can spin this way; reset the streak on anything else.
+			_avLoopCount = 0;
+			_avLoopLastRip = 0;
+			_avLoopLastTarget = 0;
+			return;
+		}
+
+		ulong accessType = *exceptionRecord->ExceptionInformation;
+		ulong target = exceptionRecord->ExceptionInformation[1];
+		if (rip == _avLoopLastRip && target == _avLoopLastTarget)
+		{
+			_avLoopCount++;
+		}
+		else
+		{
+			_avLoopLastRip = rip;
+			_avLoopLastTarget = target;
+			_avLoopCount = 1;
+			_avLoopLogged = false;
+		}
+
+		if (!_logJoinStall || _avLoopLogged || _avLoopCount < AvLoopReportThreshold)
+		{
+			return;
+		}
+
+		_avLoopLogged = true;
+		string accessText = accessType switch
+		{
+			0uL => "read",
+			1uL => "write",
+			8uL => "execute",
+			_ => $"unknown({accessType})"
+		};
+		string regionText = "n/a";
+		if (VirtualQuery((void*)target, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0)
+		{
+			regionText =
+				$"base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X} " +
+				$"state=0x{mbi.State:X8} protect=0x{mbi.Protect:X8} alloc=0x{mbi.AllocationProtect:X8} type=0x{mbi.Type:X8}";
+		}
+		string lazy = IsGuestOwnedLazyCommitAddress(target, out var lazyOwner)
+			? $"yes ({lazyOwner})"
+			: "no";
+		var active = _activeGuestThreadState;
+		Console.Error.WriteLine(
+			$"[LOADER][AV-LOOP] unrecoverable fault repeated {_avLoopCount}x " +
+			$"rip=0x{rip:X16} access={accessText} target=0x{target:X16} lazyCommit={lazy}");
+		Console.Error.WriteLine($"[LOADER][AV-LOOP]   region: {regionText}");
+		if (TryFormatNearestRuntimeSymbol(rip, out var ripSymbol))
+		{
+			Console.Error.WriteLine($"[LOADER][AV-LOOP]   rip symbol: {ripSymbol}");
+		}
+		if (active is { } g)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][AV-LOOP]   guest thread: name='{g.Name}' state={g.State} " +
+				$"lastNid={Volatile.Read(ref g.LastImportNid) ?? "none"} " +
+				$"imports={Interlocked.Read(ref g.ImportCount)} " +
+				$"lastRet=0x{Volatile.Read(ref g.LastReturnRip):X16}");
+		}
+		Console.Error.Flush();
 	}
 
 	private unsafe bool TryRecoverAuxiliaryThreadExecuteFault(

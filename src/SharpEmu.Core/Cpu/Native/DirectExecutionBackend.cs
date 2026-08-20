@@ -897,7 +897,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong Rax,
 		ulong Rbx,
 		ulong Rcx,
-		ulong Rdx);
+		ulong Rdx,
+		ulong R8,
+		ulong R9,
+		ulong R10,
+		ulong R11,
+		ulong R13);
 
 	public string BackendName => "native-backend";
 
@@ -3969,6 +3974,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"lastNid={Volatile.Read(ref target.LastImportNid) ?? "none"} " +
 			$"lastRet=0x{Volatile.Read(ref target.LastReturnRip):X16} " +
 			$"ready={Volatile.Read(ref _readyGuestThreadCount)}");
+		unsafe
+		{
+			// If a thread acquired the VEH-entry lock and then blocked inside the
+			// managed handler, every other faulting thread spins here forever. A
+			// non-zero owner with a live depth while imports are stalled points at a
+			// held-lock deadlock rather than an AV loop (which leaves owner near 0).
+			if (_vehManagedEntryLock != 0)
+			{
+				nint owner = Volatile.Read(ref *(nint*)_vehManagedEntryLock);
+				int depth = Volatile.Read(ref *(int*)(_vehManagedEntryLock + sizeof(nint)));
+				Console.Error.WriteLine(
+					$"[LOADER][JOIN-STALL]   veh_entry_lock owner=0x{(ulong)owner:X16} depth={depth}");
+			}
+		}
 		if (!includeAllThreads)
 		{
 			Console.Error.Flush();
@@ -6977,6 +6996,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall stack: [rsp]=0x{value:X16} [rsp+8]=0x{value2:X16}");
 			}
 
+			unsafe
+			{
+				// The VEH-entry recursive spinlock serializes managed exception-handler
+				// entry. If threads are spinning at the trampoline acquire (host_rip in
+				// the trampoline) while this word stays non-zero, the lock is wedged: an
+				// owner acquired it and never released. Print owner + depth so the wedged
+				// owner id can be matched against the host thread ids above.
+				if (_vehManagedEntryLock != 0)
+				{
+					nint owner = Volatile.Read(ref *(nint*)_vehManagedEntryLock);
+					int depth = Volatile.Read(ref *(int*)(_vehManagedEntryLock + sizeof(nint)));
+					Console.Error.WriteLine(
+						$"[LOADER][ERROR] Stall veh_entry_lock addr=0x{(ulong)_vehManagedEntryLock:X16} " +
+						$"owner=0x{(ulong)owner:X16} depth={depth}");
+				}
+			}
+
 			var threads = SnapshotGuestThreads();
 			if (threads.Length != 0)
 			{
@@ -6990,7 +7026,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						hostContextText =
 							$" host_tid={hostThreadId} host_rip=0x{hostContext.Rip:X16} host_rsp=0x{hostContext.Rsp:X16} " +
 							$"host_rbp=0x{hostContext.Rbp:X16} host_rax=0x{hostContext.Rax:X16} host_rbx=0x{hostContext.Rbx:X16} " +
-							$"host_rcx=0x{hostContext.Rcx:X16} host_rdx=0x{hostContext.Rdx:X16}";
+							$"host_rcx=0x{hostContext.Rcx:X16} host_rdx=0x{hostContext.Rdx:X16} " +
+							$"host_r8=0x{hostContext.R8:X16} host_r9=0x{hostContext.R9:X16} host_r10=0x{hostContext.R10:X16} " +
+							$"host_r11=0x{hostContext.R11:X16} host_r13=0x{hostContext.R13:X16}";
 					}
 					else if (hostThreadId != 0)
 					{
@@ -7056,7 +7094,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				ReadCtxU64(contextRecord, 120),
 				ReadCtxU64(contextRecord, 144),
 				ReadCtxU64(contextRecord, 128),
-				ReadCtxU64(contextRecord, 136));
+				ReadCtxU64(contextRecord, 136),
+				ReadCtxU64(contextRecord, 184),
+				ReadCtxU64(contextRecord, 192),
+				ReadCtxU64(contextRecord, 200),
+				ReadCtxU64(contextRecord, 208),
+				ReadCtxU64(contextRecord, 224));
 			return true;
 		}
 		finally
