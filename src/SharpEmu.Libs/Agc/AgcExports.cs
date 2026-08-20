@@ -1441,7 +1441,7 @@ public static partial class AgcExports
         }
     }
 
-    private readonly record struct RenderTargetDescriptor(
+    internal readonly record struct RenderTargetDescriptor(
         uint Slot,
         ulong Address,
         uint Width,
@@ -5260,8 +5260,9 @@ public static partial class AgcExports
                         handle,
                         displayBufferIndex,
                         out var pendingDisplayBuffer) &&
-                    state.KnownRenderTargets.TryGetValue(
-                        pendingDisplayBuffer.Address,
+                    TryResolveDisplayScanoutTarget(
+                        state,
+                        pendingDisplayBuffer,
                         out var pendingDisplayTarget))
                 {
                     var textures = CreateGuestDrawTextures(
@@ -11763,6 +11764,65 @@ public static partial class AgcExports
     }
 
 
+
+    /// Resolves the color target a targetless final blit should composite into
+    /// for the given VideoOut scanout buffer.
+    ///
+    /// Preferred: the guest already rendered a color target at the scanout
+    /// address, so reuse its exact GPU descriptor (Sarah / Prospero / Doom, which
+    /// render straight into the display buffer). Fallback: a Unity-style engine
+    /// renders the scene to a separate offscreen target and flips a distinct
+    /// registered VideoOut scanout buffer via a targetless blit that omits the CB
+    /// registers. That scanout buffer never appears in KnownRenderTargets, so
+    /// synthesize its descriptor from the registered VideoOut attributes
+    /// (address/size from the display buffer, format from its pixel format). This
+    /// makes the blit composite into the real scanout surface — it is not a raw
+    /// guest-memory blit: an actual GPU draw produces the presented image.
+    private static bool TryResolveDisplayScanoutTarget(
+        SubmittedDcbState state,
+        in VideoOutExports.DisplayBufferInfo displayBuffer,
+        out RenderTargetDescriptor target)
+    {
+        if (state.KnownRenderTargets.TryGetValue(displayBuffer.Address, out target))
+        {
+            return true;
+        }
+
+        return TryCreateScanoutRenderTarget(displayBuffer, out target);
+    }
+
+    /// Builds a color RenderTargetDescriptor from a registered VideoOut display
+    /// buffer. PS5 scanout pixel formats are either 8-bit sRGB (CB color format
+    /// 10, numberType 9 -> R8G8B8A8_SRGB) or 10-bit packed (CB color format 9 ->
+    /// A2R10G10B10). TileMode 0 is correct: the composite renders into a Vulkan
+    /// image, so the guest scanout tiling is irrelevant to the produced draw.
+    internal static bool TryCreateScanoutRenderTarget(
+        in VideoOutExports.DisplayBufferInfo displayBuffer,
+        out RenderTargetDescriptor target)
+    {
+        if (displayBuffer.Address == 0 ||
+            displayBuffer.Width == 0 ||
+            displayBuffer.Height == 0)
+        {
+            target = default;
+            return false;
+        }
+
+        var (format, numberType) =
+            VideoOutExports.IsPacked10BitPixelFormat(displayBuffer.PixelFormat)
+                ? (9u, 0u)
+                : (10u, 9u);
+
+        target = new RenderTargetDescriptor(
+            Slot: 0,
+            displayBuffer.Address,
+            displayBuffer.Width,
+            displayBuffer.Height,
+            format,
+            numberType,
+            TileMode: 0);
+        return true;
+    }
 
     /// <summary>
     /// On PS5 render targets alias guest memory, so pixels the game wrote with
