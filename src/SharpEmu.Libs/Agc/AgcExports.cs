@@ -1236,6 +1236,15 @@ public static partial class AgcExports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
             "1",
             StringComparison.Ordinal);
+    // Bounded diagnostic (SHARPEMU_LOG_AGC_REGS=1) for context-register state flow:
+    // logs indirect register writes in the CB-colour/viewport/scissor ranges and the
+    // colour-target registers present when a draw extracts its render targets. Used
+    // to locate where indirect-programmed scanout state fails to reach extraction.
+    private static readonly bool _traceAgcRegs = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_REGS"),
+        "1",
+        StringComparison.Ordinal);
+    private static int _traceAgcRegsBudget = 4000;
     private static readonly ulong? _traceComputeShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_SHADER_ADDRESS"));
     private static readonly ulong? _tracePixelShaderAddress = ParseOptionalHexAddress(
@@ -7791,6 +7800,16 @@ public static partial class AgcExports
                 {
                     ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
                 }
+
+                if (_traceAgcRegs &&
+                    op == ItSetContextReg &&
+                    IsTrackedContextRegister(startRegister + index) &&
+                    Interlocked.Decrement(ref _traceAgcRegsBudget) >= 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][AGC-REGS] cx_direct off=0x{startRegister + index:X} val=0x{value:X8} " +
+                        $"({DescribeContextRegister(startRegister + index)})");
+                }
             }
 
             return;
@@ -7803,6 +7822,23 @@ public static partial class AgcExports
             !TryReadUInt64(ctx, packetAddress + 8, out var registersAddress))
         {
             return;
+        }
+
+        if (_traceAgcRegs &&
+            register == RCxRegsIndirect &&
+            Interlocked.Decrement(ref _traceAgcRegsBudget) >= 0)
+        {
+            var raw = new System.Text.StringBuilder();
+            for (uint w = 0; w < System.Math.Min(registerCount * 2u, 16u); w++)
+            {
+                if (!TryReadUInt32(ctx, registersAddress + ((ulong)w * 4), out var wv))
+                {
+                    break;
+                }
+                raw.Append($"{wv:X8} ");
+            }
+            Console.Error.WriteLine(
+                $"[LOADER][AGC-REGS] cx_indirect_table regs=0x{registersAddress:X} count={registerCount} raw=[ {raw}]");
         }
 
         var destination = register switch
@@ -7829,7 +7865,48 @@ public static partial class AgcExports
             {
                 ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
             }
+
+            if (_traceAgcRegs &&
+                register == RCxRegsIndirect &&
+                IsTrackedContextRegister(registerOffset) &&
+                Interlocked.Decrement(ref _traceAgcRegsBudget) >= 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][AGC-REGS] cx_indirect off=0x{registerOffset:X} val=0x{value:X8} " +
+                    $"({DescribeContextRegister(registerOffset)})");
+            }
         }
+    }
+
+    // Context-register offsets whose flow we trace to locate lost scanout state:
+    // CB colour targets (base/info/attrib/ext, slots 0..7), viewport scale/offset,
+    // and screen/window/generic/viewport scissors.
+    private static bool IsTrackedContextRegister(uint offset) =>
+        (offset >= CbColor0Base && offset <= CbColor0Attrib3 + 8u * CbColorRegisterStride) ||
+        (offset >= PaScScreenScissorTl && offset <= PaScVportScissor0Br) ||
+        (offset >= PaClVportXScale && offset <= PaClVportXScale + 6u);
+
+    private static string DescribeContextRegister(uint offset)
+    {
+        for (uint slot = 0; slot < ColorTargetCount; slot++)
+        {
+            var stride = slot * CbColorRegisterStride;
+            if (offset == CbColor0Base + stride) return $"CB_COLOR{slot}_BASE";
+            if (offset == CbColor0Info + stride) return $"CB_COLOR{slot}_INFO";
+            if (offset == CbColor0BaseExt + slot) return $"CB_COLOR{slot}_BASE_EXT";
+            if (offset == CbColor0Attrib2 + slot) return $"CB_COLOR{slot}_ATTRIB2";
+            if (offset == CbColor0Attrib3 + slot) return $"CB_COLOR{slot}_ATTRIB3";
+        }
+
+        return offset switch
+        {
+            PaScScreenScissorTl => "PA_SC_SCREEN_SCISSOR_TL",
+            PaScScreenScissorBr => "PA_SC_SCREEN_SCISSOR_BR",
+            PaScGenericScissorTl => "PA_SC_GENERIC_SCISSOR_TL",
+            PaScVportScissor0Tl => "PA_SC_VPORT_SCISSOR_0_TL",
+            PaClVportXScale => "PA_CL_VPORT_XSCALE",
+            _ => $"ctx_0x{offset:X}",
+        };
     }
 
     /// <summary>
@@ -10039,6 +10116,17 @@ public static partial class AgcExports
         bool includeMaskedTargets = false)
     {
         var hasTargetMask = registers.TryGetValue(CbTargetMask, out var targetMask);
+        if (_traceAgcRegs && Interlocked.Decrement(ref _traceAgcRegsBudget) >= 0)
+        {
+            Console.Error.WriteLine(
+                "[LOADER][AGC-REGS] extract slot0 present: " +
+                $"BASE={registers.ContainsKey(CbColor0Base)} " +
+                $"INFO={registers.ContainsKey(CbColor0Info)} " +
+                $"BASE_EXT={registers.ContainsKey(CbColor0BaseExt)} " +
+                $"ATTRIB2={registers.ContainsKey(CbColor0Attrib2)} " +
+                $"ATTRIB3={registers.ContainsKey(CbColor0Attrib3)} " +
+                $"TARGET_MASK={hasTargetMask}(0x{targetMask:X}) reg_count={registers.Count}");
+        }
         var targets = new List<RenderTargetDescriptor>(ColorTargetCount);
         for (uint slot = 0; slot < ColorTargetCount; slot++)
         {
