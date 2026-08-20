@@ -47,3 +47,6 @@ clean_test/
 .debug/
 
 .history/
+real-tests/**/PPSA*-app0/
+real-tests/*/PPSA*-app0/
+real-tests/PPSA*-app0/
