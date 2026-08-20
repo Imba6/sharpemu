@@ -2695,13 +2695,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		byte* code = (byte*)ptr;
 		int offset = 0;
 
-		ReadOnlySpan<uint> nonManagedExceptionCodes =
-		[
-			0xE0434352u, // CLR managed exception
-			0xE06D7363u, // MSVC C++ exception
-			0xC0000409u, // STATUS_STACK_BUFFER_OVERRUN / FailFast
-			0xC00000FDu, // STATUS_STACK_OVERFLOW
-		];
+		// One source of truth shared with WindowsFaultHandling.CreateHandlerThunk so
+		// the two fault paths can never filter different codes (a divergence would
+		// let a cooperative-mode fault enter the managed VEH and fatally fail with
+		// "UnmanagedCallersOnly method from managed code").
+		ReadOnlySpan<uint> nonManagedExceptionCodes = Windows.WindowsFaultCodes.NonManagedVehPreFilterCodes;
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx]
 		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00); // mov eax, [rax] ExceptionCode
 		var passJumpOffsets = stackalloc int[nonManagedExceptionCodes.Length];
@@ -2713,7 +2711,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			EmitByte(code, ref offset, 0x74);
 			passJumpOffsets[i] = offset;
 			EmitByte(code, ref offset, 0x00);
-			if (nonManagedExceptionCodes[i] == 0xC0000409u)
+			if (nonManagedExceptionCodes[i] == Windows.WindowsFaultCodes.FastFail)
 			{
 				fastFailJumpSlot = i;
 			}
@@ -5967,7 +5965,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"detail={detail}");
 	}
 
-	private static void ApplyGuestContinuation(CpuContext context, GuestCpuContinuation continuation)
+	internal static void ApplyGuestContinuation(CpuContext context, GuestCpuContinuation continuation)
 	{
 		context.Rip = continuation.Rip;
 		context.Rflags = continuation.Rflags == 0 ? 0x202UL : continuation.Rflags;
