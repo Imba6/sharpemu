@@ -25,33 +25,45 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="ppy.SDL3-CS" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- Forces build ordering for the aerolib task below; loaded as a build component,
-         never a runtime dependency. -->
-    <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
-                      ReferenceOutputAssembly="false" />
-  </ItemGroup>
-
   <!-- aerolib.bin (the runtime NID -> name catalog) is derived data: generated here
-       from scripts/ps5_names.txt via the same Ps5Nid implementation the analyzers use,
-       embedded from the intermediate directory, and never committed. Replaces
-       scripts/generate_aerolib_binary.py. -->
+       from scripts/ps5_names.txt at build time and never committed. Replaces
+       scripts/generate_aerolib_binary.py.
+
+       The generator task is compiled from local source (build/AerolibBinaryGenerator.build.cs)
+       by RoslynCodeTaskFactory into a temporary task assembly. It deliberately does NOT
+       load SharpEmu.SourceGenerators.dll: that earlier design read the freshly built
+       analyzer assembly in a separate TaskHostFactory process, and on the Windows host
+       building over the \\wsl.localhost 9P share that cross-process read of a just-written
+       project output was intermittently incoherent — failing with MSB4062
+       "GenerateAerolibBinaryTask could not be loaded" and cascading into a missing
+       SharpEmu.HLE reference assembly for downstream projects. Compiling from local source
+       removes the cross-project/cross-process dependency (and the SourceGenerators
+       ProjectReference HLE previously carried only for build ordering) entirely. -->
   <PropertyGroup>
     <SharpEmuAerolibNamesFile>$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt</SharpEmuAerolibNamesFile>
-    <SharpEmuAerolibTaskAssembly>$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
+    <SharpEmuAerolibTaskSource>$(MSBuildThisFileDirectory)build\AerolibBinaryGenerator.build.cs</SharpEmuAerolibTaskSource>
   </PropertyGroup>
 
-  <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
-             TaskFactory="TaskHostFactory"
-             AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
+  <!-- Build-time-only source: fed to RoslynCodeTaskFactory below, never compiled into
+       SharpEmu.HLE (it references Microsoft.Build.Framework, which the runtime assembly
+       does not). -->
+  <ItemGroup>
+    <Compile Remove="build\**\*.cs" />
+  </ItemGroup>
 
-  <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
-       resource processing embeds the output. Skipped for design-time builds: the IDE
-       resolves project references without compiling them, so on a fresh clone the task
-       assembly does not exist yet and loading it would break the design-time build. -->
+  <UsingTask TaskName="SharpEmu.HLE.Build.GenerateAerolibBinaryTask"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <Task>
+      <Code Type="Class" Language="cs" Source="$(SharpEmuAerolibTaskSource)" />
+    </Task>
+  </UsingTask>
+
+  <!-- Generates aerolib.bin before resource processing embeds it. Skipped for
+       design-time builds, which do not compile and so never need the embedded catalog.
+       Incremental via Inputs/Outputs (names file + the generator source). -->
   <Target Name="GenerateAerolibBinary"
-          DependsOnTargets="ResolveProjectReferences"
-          Inputs="$(SharpEmuAerolibNamesFile);$(SharpEmuAerolibTaskAssembly)"
+          Inputs="$(SharpEmuAerolibNamesFile);$(SharpEmuAerolibTaskSource)"
           Outputs="$(IntermediateOutputPath)aerolib.bin">
     <GenerateAerolibBinaryTask NamesFile="$(SharpEmuAerolibNamesFile)"
                                OutputFile="$(IntermediateOutputPath)aerolib.bin" />
