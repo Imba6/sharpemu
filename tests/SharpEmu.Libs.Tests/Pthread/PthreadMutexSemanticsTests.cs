@@ -370,6 +370,73 @@ public sealed class PthreadMutexSemanticsTests
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
     }
 
+    // Regression for the mutex-abandonment fix: when a guest thread is abandoned
+    // (TBB worker_abort / abrupt teardown) while holding a mutex that has a queued
+    // contended waiter, AbandonMutexesOwnedByThread must release the owner AND hand
+    // the mutex off to the waiter through the normal grant path. The old code locked
+    // the state object and Monitor.PulseAll'd it while host waiters block on their
+    // HostSignal, so the waiter was never woken and wedged forever — this test times
+    // out on that implementation and passes once the hand-off uses HostSignal.
+    [Fact]
+    public async Task AbandonMutex_HandsOffToContendedHostWaiter()
+    {
+        const ulong memoryBase = 0x5_0000_0000;
+        const ulong mutexAddress = memoryBase + 0x100;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+
+        ulong ownerHandle = 0;
+        using var ownerAcquired = new ManualResetEventSlim(false);
+        using var ownerMayExit = new ManualResetEventSlim(false);
+
+        // Owner acquires the mutex, records its guest handle, then stalls holding it
+        // (standing in for a worker aborted mid-critical-section).
+        var ownerTask = Task.Factory.StartNew(
+            () =>
+            {
+                var context = new CpuContext(memory, Generation.Gen5);
+                Assert.True(context.TryWriteUInt64(mutexAddress, 1)); // adaptive static init
+                context[CpuRegister.Rdi] = mutexAddress;
+                Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+                ownerHandle = KernelPthreadState.GetCurrentThreadHandle();
+                ownerAcquired.Set();
+                ownerMayExit.Wait(TimeSpan.FromSeconds(10));
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        Assert.True(ownerAcquired.Wait(TimeSpan.FromSeconds(5)));
+
+        // A second guest thread contends and blocks on the held mutex (host-wait path).
+        var waiterAcquired = 0;
+        var waiterTask = Task.Factory.StartNew(
+            () =>
+            {
+                var context = new CpuContext(memory, Generation.Gen5);
+                context[CpuRegister.Rdi] = mutexAddress;
+                Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+                Interlocked.Exchange(ref waiterAcquired, 1);
+                Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        // Give the waiter time to enqueue and block; it must not have acquired yet.
+        Thread.Sleep(200);
+        Assert.Equal(0, Volatile.Read(ref waiterAcquired));
+
+        // Abandon the owner. The queued waiter must be granted and woken.
+        var released = KernelPthreadCompatExports.AbandonMutexesOwnedByThread(ownerHandle, "test_abort");
+        Assert.Equal(1, released);
+
+        await waiterTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, Volatile.Read(ref waiterAcquired));
+
+        ownerMayExit.Set();
+        await ownerTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
     {
         private readonly ulong _baseAddress;

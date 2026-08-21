@@ -176,40 +176,61 @@ public static class KernelPthreadCompatExports
         }
 
         var released = 0;
-        var wakeKeys = new List<string>();
+        List<string>? cooperativeWakeKeys = null;
         foreach (var pair in _mutexStates)
         {
             var state = pair.Value;
-            string? wakeKey = null;
-            lock (state)
+            PthreadMutexWaiter? nextWaiter = null;
+            // Same synchronization domain as every other mutex operation. The prior
+            // code locked the state object and Monitor.PulseAll'd it, but lock/unlock
+            // use state.SyncRoot and waiters block on their HostSignal (host) or the
+            // cooperative scheduler wake — never the state monitor — so the pulse woke
+            // nobody and the Waiters list was touched off-lock. A host waiter queued at
+            // abandonment was then left blocked forever on a mutex that read as
+            // "free with a queued waiter", wedging every later locker.
+            lock (state.SyncRoot)
             {
                 if (state.OwnerThreadId != threadId || state.RecursionCount <= 0)
                 {
                     continue;
                 }
 
+                var waiterCount = state.Waiters.Count;
+
+                // Force-release exactly as a final unlock would, then hand the mutex
+                // to the FIFO head waiter through the normal grant path so ownership
+                // transfers atomically and no waiter is stranded.
                 state.OwnerThreadId = 0;
                 state.RecursionCount = 0;
-                wakeKey = state.Waiters.First?.Value.Cooperative == true
-                    ? state.Waiters.First.Value.WakeKey
-                    : null;
-                Monitor.PulseAll(state);
+                if (state.Waiters.First is { } headNode &&
+                    TryGrantMutexWaiterLocked(state, headNode.Value))
+                {
+                    nextWaiter = headNode.Value;
+                    if (!nextWaiter.Cooperative)
+                    {
+                        nextWaiter.HostSignal!.Set();
+                    }
+                }
+
                 released++;
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
                     $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
-                    $"reason={reason} waiters={state.Waiters.Count}");
+                    $"reason={reason} waiters={waiterCount}");
             }
 
-            if (wakeKey is not null)
+            if (nextWaiter is { Cooperative: true })
             {
-                wakeKeys.Add(wakeKey);
+                (cooperativeWakeKeys ??= new List<string>()).Add(nextWaiter.WakeKey);
             }
         }
 
-        foreach (var wakeKey in wakeKeys)
+        if (cooperativeWakeKeys is not null)
         {
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+            foreach (var wakeKey in cooperativeWakeKeys)
+            {
+                _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+            }
         }
 
         if (released > 0)
