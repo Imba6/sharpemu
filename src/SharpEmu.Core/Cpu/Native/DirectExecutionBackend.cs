@@ -913,6 +913,73 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return *(ulong*)((byte*)contextRecord + offset);
 	}
 
+	// Phase-1 global watcher (default OFF, SHARPEMU_WATCH_ADDR=0x… hex). Polls one
+	// 8-byte guest location through the memory interface (safe: returns before the
+	// module backing it is mapped) and logs every value transition with a monotonic
+	// elapsed timestamp, so a hash-map global's buckets pointer can be seen going
+	// NULL -> valid and its ordering vs a later crash established WITHOUT a hardware
+	// watchpoint. Bounded transition budget so it can never flood.
+	private static void MaybeStartGlobalWatcher(CpuContext context)
+	{
+		var raw = Environment.GetEnvironmentVariable("SHARPEMU_WATCH_ADDR");
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return;
+		}
+
+		var text = raw.Trim();
+		var digits = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+			? text.AsSpan(2)
+			: text.AsSpan();
+		if (!ulong.TryParse(digits, System.Globalization.NumberStyles.HexNumber, null, out var address))
+		{
+			return;
+		}
+
+		var memory = context.Memory;
+		var watcher = new Thread(() =>
+		{
+			var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+			var buffer = new byte[8];
+			var previous = 0UL;
+			var havePrevious = false;
+			var mappedYet = false;
+			var budget = 512;
+			while (budget > 0)
+			{
+				if (memory.TryRead(address, buffer))
+				{
+					if (!mappedYet)
+					{
+						mappedYet = true;
+						budget--;
+						Console.Error.WriteLine(
+							$"[LOADER][WATCH] addr=0x{address:X16} mapped t={stopwatch.ElapsedMilliseconds}ms");
+					}
+
+					var value = BitConverter.ToUInt64(buffer, 0);
+					if (!havePrevious || value != previous)
+					{
+						budget--;
+						Console.Error.WriteLine(
+							$"[LOADER][WATCH] addr=0x{address:X16} " +
+							$"{(havePrevious ? $"0x{previous:X16}" : "<first>")} -> 0x{value:X16} " +
+							$"t={stopwatch.ElapsedMilliseconds}ms");
+						previous = value;
+						havePrevious = true;
+					}
+				}
+
+				Thread.SpinWait(4000);
+			}
+		})
+		{
+			IsBackground = true,
+			Name = "sharpemu-global-watch",
+		};
+		watcher.Start();
+	}
+
 	private unsafe static int CallNativeEntry(void* entry)
 	{
 		var nativeEntry = (delegate* unmanaged[Cdecl]<int>)entry;
@@ -1159,6 +1226,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export2) ? ("[LOADER][INFO] ExportCheck map_direct: " + export2.LibraryName + ":" + export2.Name) : "[LOADER][INFO] ExportCheck map_direct: MISSING");
 		_entryPoint = entryPoint;
 		_cpuContext = context;
+		MaybeStartGlobalWatcher(context);
 		_debugHook = executionOptions.DebugHook;
 		_returnFallbackTarget = context[CpuRegister.Rsi];
 		Volatile.Write(ref _globalFallbackTarget, _returnFallbackTarget);
