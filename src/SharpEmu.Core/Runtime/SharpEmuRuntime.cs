@@ -24,6 +24,21 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 {
     private readonly record struct LoadedModuleImage(string Path, SelfImage Image, int Handle, bool StartAtBoot);
 
+    // FMOD discovers audio plugins by dlsym'ing this exported entry point and calling the
+    // function pointers it returns; a module that exports it is an FMOD plugin FMOD loads
+    // directly (no LoadStartModule), so its DT_INIT must be forced at boot. NID is the PS5
+    // symbol hash of the name; both forms are checked because export tables key by either.
+    private const string FmodPluginAbiExportName = "FMODGetPluginDescriptionList";
+    private const string FmodPluginAbiExportNid = "44sreXeHo5Q";
+
+    // True when a module's export table advertises the FMOD plugin ABI entry point (under
+    // either its NID or its plain name). Such a module is an FMOD plugin that FMOD loads by
+    // dlsym'ing this entry and calling into the returned descriptor, never through
+    // LoadStartModule, so its DT_INIT must be forced at boot or its constructors never run.
+    internal static bool ExportsFmodPluginAbi(IReadOnlyDictionary<string, ulong> exports) =>
+        exports is not null &&
+        (exports.ContainsKey(FmodPluginAbiExportNid) || exports.ContainsKey(FmodPluginAbiExportName));
+
     private static readonly HashSet<string> PreloadSkipModules = new(StringComparer.OrdinalIgnoreCase)
     {
         "libkernel.prx",
@@ -766,6 +781,38 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Console.Error.WriteLine(
             $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
+
+        // A Media/Plugins module is deferred (StartAtBoot=false) on the assumption the
+        // guest loads it on demand via sceKernelLoadStartModule, which runs its DT_INIT
+        // then. That assumption is false for an FMOD audio plugin: FMOD discovers a plugin
+        // by dlsym'ing its FMODGetPluginDescriptionList entry point and then calls the
+        // function pointers in the returned descriptor directly — the guest never
+        // LoadStartModule's it, so its DT_INIT never runs and its globals (e.g. a string
+        // hash-map registry) are read while still uninitialized, faulting deep inside the
+        // plugin. libresonanceaudio.prx is exactly this case in Cocoon: FMOD enters its
+        // code with buckets==NULL and the lookup dereferences null. Promote any deferred
+        // module that exports the FMOD plugin ABI entry point to start-at-boot so its
+        // DT_INIT runs before FMOD ever calls in. Generic: keyed on the FMOD plugin ABI
+        // export, not on a module name or title. (A plugin the guest also LoadStartModule's
+        // is harmless — the module-start guard makes DT_INIT run exactly once.)
+        for (var i = 0; i < loadedImages.Count; i++)
+        {
+            var entry = loadedImages[i];
+            if (entry.StartAtBoot)
+            {
+                continue;
+            }
+
+            if (ExportsFmodPluginAbi(entry.Image.RuntimeSymbols))
+            {
+                loadedImages[i] = entry with { StartAtBoot = true };
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Promoting {Path.GetFileName(entry.Path)} to start-at-boot: " +
+                    "exports the FMOD plugin ABI (FMODGetPluginDescriptionList) so FMOD calls " +
+                    "into it via dlsym without LoadStartModule — its DT_INIT must run first.");
+            }
+        }
+
         return loadedImages;
     }
 
