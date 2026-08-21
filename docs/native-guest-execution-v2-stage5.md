@@ -129,3 +129,41 @@ Stop and report (do not force 5B) if: `ExecuteEntry` cannot distinguish blocked 
 returned cleanly; the primary's cooperative continuation cannot integrate with the ready
 queue; the Boehm handshake deadlocks; the import-loop guard loss hangs the primary;
 process shutdown becomes ambiguous; or the 28cab08 deadlock returns.
+
+## 9. Stage 5A implementation attempt — result (REVERTED)
+
+An implementation was built and tested behind `SHARPEMU_NATIVE_GUEST_V2_PRIMARY=1`
+(requires V2): the process entry (gated to `frameKind==ProcessEntry`, since module
+initializers also flow through `ExecuteEntry`) is registered as a real cooperative
+`GuestThreadState`; `ExecuteEntry` schedules it and waits on an exit event while the
+existing ready-dispatcher drives it through `RunGuestThread` — reusing the whole
+ordinary-pthread path (cooperative block/yield/resume, cooperative 0x1E on the
+thread's `ExecutionRunner`). This unified 5A with 5B (the scheduled primary runs on a
+native worker under V2), because the audit showed the cooperative delivery/resume path
+is inherently runner-based and cannot be cleanly kept "inline."
+
+**Validated (core hypothesis):** the host-park nested 0x1E delivery is GONE — Cocoon runs
+show `kernel exception 0x1E host park` = 0 and **zero UnmanagedCallersOnly `__fastfail`**.
+Cooperative block/resume works (guest-thread log: one fresh entry, 3,632 cooperative
+resumes, no crash). So making the primary a cooperative scheduled thread does eliminate
+the crash class this whole effort targeted.
+
+**Regression (stop condition hit):** Cocoon stalls at 0 fps and never reaches gameplay.
+The primary repeatedly resumes to the SAME guest RIP (`0x800D2622A` — a Unity
+frame-sync / job-fence hot wait), ~15× in a row: it is woken, re-checks the wait, and
+re-blocks without progress. That block/resume **churn** — each cycle paying pooled-worker
+rent + cross-thread signalling + continuation capture/restore — crawls the render loop
+(`draw_ms` ~4865 ms, only a handful of videoout samples in 200 s). The main thread's
+execution pattern is high-frequency short poll-waits, for which the per-block cooperative
+overhead is pathological (ordinary pthreads block on real, infrequent waits, so they do
+not exhibit this). Reverted (no production code retained; design kept).
+
+**Conclusion / recommended next step.** The crash is definitively the host-park nested
+delivery, and cooperative blocking removes it — but the primary cannot pay per-block
+pooled-worker overhead on its hot frame-sync waits. The correct model is a **cooperative
+primary pinned to its own dedicated persistent native worker** (owned for the whole
+session, never rented per block), so block/resume is a same-thread continuation with no
+pool rent/handoff, while staying GC-safe on a native base. Alternatively, first determine
+whether the `0x800D2622A` wake is spurious (a wake-key over-match exposed by the primary)
+— if so, cooperative blocking without the worker churn may suffice. Either is a focused
+follow-up; neither should be rushed into this milestone.
