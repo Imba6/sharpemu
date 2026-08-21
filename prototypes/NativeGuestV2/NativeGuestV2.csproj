@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Native Guest Execution V2 prototype / stress harness.
+    Standalone: proves the native-worker CLR/GC boundary (raw OS threads running
+    emitted native code that reverse-P/Invokes managed HLE) survives high
+    concurrency under continuous forced .NET GC, with block/resume, worker reuse
+    across guests, and nested host to guest to host callbacks, with NO CLR
+    UnmanagedCallersOnly fastfail. See docs/native-guest-execution-v2.md.
+    Not referenced by the emulator; run directly on Windows.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseAppHost>false</UseAppHost>
+    <AssemblyName>NativeGuestV2</AssemblyName>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+</Project>

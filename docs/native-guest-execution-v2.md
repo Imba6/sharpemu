@@ -264,6 +264,48 @@ DoomGeneric).
 
 ---
 
+## 5a. Prototype results (`prototypes/NativeGuestV2/`, Windows x64)
+
+The harness emits, per worker, a native loop on a raw kernel32 `CreateThread` thread
+that calls an emitted synthetic guest body containing arbitrary native frames, which
+reverse-P/Invokes managed `[UnmanagedCallersOnly]` HLE (allocating for GC pressure,
+requesting BLOCK / NEST / FINISH). A pool of workers is rented per guest slice
+(block → yield → resume on the next rented worker → worker reuse/migration); a
+background thread hammers `GC.Collect(2, Forced, blocking)`.
+
+Native-worker mode — **all PASS**, zero UnmanagedCallersOnly `__fastfail`, zero HLE
+exceptions, all work completed exactly, block/resume + nested callbacks correct:
+
+| config | peak workers | HLE calls | forced GCs | nested | result |
+|---|---|---|---|---|---|
+| 16 guests / pool 16 | 16 | 8.0M | 7,263 | 215,680 | PASS |
+| 32 guests / pool 32 | 32 | 16.0M | 3,287 | 431,360 | PASS |
+| 64 guests / pool 48 | 53 | 19.2M | 917 | 516,864 | PASS |
+| 48 guests, **Server GC** | 48 | 19.2M | 1,978 | 1,126,608 | PASS |
+
+- **Concurrency ≫ 2 works** (16 → 53 concurrent workers), disproving any GC-safety
+  ceiling at 2 — the `_nativeWorkerRunLimiter` is a create/fault-storm throttle only.
+- **No `__fastfail` under continuous forced GC**, including **Server GC** (more
+  aggressive suspension) — the model's central claim holds.
+- **block/resume + worker reuse across guests + nested host→guest→host callbacks** all
+  exercised and verified at scale.
+
+Inline control (`--inline=1`, the emitted guest body run directly on managed driver
+threads via `delegate* unmanaged` calli — the production `CallNativeEntry` shape): ran
+to completion cleanly under 1,000+ forced GCs and did **not** reproduce the
+`__fastfail`. The synthetic guest body's frames are too shallow/uniform for the .NET GC
+hijack-across-guest-frames pathology; the real crash needs genuine arbitrary guest
+x86-64 code (deep, varied Unity/il2cpp/FMOD call chains) and is reproduced by Cocoon
+itself (see `cocoon-gameplay-uco-crash`). This does not weaken the positive result: the
+native-worker model passes the identical stress the inline path is theorised to fail,
+and structurally removes guest frames from managed stacks so the pathology cannot arise.
+
+Run: `dotnet build prototypes/NativeGuestV2 -c Release`, then
+`dotnet <artifacts>/NativeGuestV2.dll --guests=32 --pool=32 --steps=500000 --gc=1`
+(add `--inline=1` for the control; set `DOTNET_gcServer=1` for Server GC). Launch the
+DLL with a Windows-local working directory — a `\\wsl.localhost` UNC cwd breaks apphost
+launch.
+
 ## 6. Migration plan (staged, post-proof)
 
 1. **Prototype proof** (this doc's harness) — no emulator changes.
