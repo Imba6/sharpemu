@@ -919,9 +919,32 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	// elapsed timestamp, so a hash-map global's buckets pointer can be seen going
 	// NULL -> valid and its ordering vs a later crash established WITHOUT a hardware
 	// watchpoint. Bounded transition budget so it can never flood.
+	private static int _globalWatcherStarted;
+
 	private static void MaybeStartGlobalWatcher(CpuContext context)
 	{
 		var raw = Environment.GetEnvironmentVariable("SHARPEMU_WATCH_ADDR");
+		var dumpRaw = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_CODE");
+		if (string.IsNullOrWhiteSpace(raw) && string.IsNullOrWhiteSpace(dumpRaw))
+		{
+			return;
+		}
+
+		// Execute() runs once per preloaded module; start exactly one watcher so a
+		// dozen spinning poll threads do not perturb the guest's timing.
+		if (Interlocked.Exchange(ref _globalWatcherStarted, 1) != 0)
+		{
+			return;
+		}
+
+		// Optional one-shot code dump: SHARPEMU_DUMP_CODE=0x<addr>:<len> prints the
+		// bytes once the region is mapped, for offline disassembly (trace how a
+		// register/pointer is loaded without a decrypted eboot).
+		if (!string.IsNullOrWhiteSpace(dumpRaw))
+		{
+			StartCodeDump(context, dumpRaw!);
+		}
+
 		if (string.IsNullOrWhiteSpace(raw))
 		{
 			return;
@@ -978,6 +1001,87 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Name = "sharpemu-global-watch",
 		};
 		watcher.Start();
+	}
+
+	// One-shot code dumper: waits until each requested region is mapped AND non-zero
+	// (i.e. the owning module's code/data is actually loaded) then prints the raw
+	// bytes for offline disassembly. spec: "0xADDR:LEN[,0xADDR:LEN...]".
+	private static void StartCodeDump(CpuContext context, string spec)
+	{
+		var regions = new List<(ulong Address, int Length)>();
+		foreach (var part in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var colon = part.IndexOf(':');
+			var addrText = colon >= 0 ? part[..colon] : part;
+			var lenText = colon >= 0 ? part[(colon + 1)..] : "256";
+			var addrDigits = addrText.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+				? addrText.AsSpan(2)
+				: addrText.AsSpan();
+			if (!ulong.TryParse(addrDigits, System.Globalization.NumberStyles.HexNumber, null, out var addr))
+			{
+				continue;
+			}
+
+			if (!int.TryParse(lenText, out var len) || len <= 0 || len > 4096)
+			{
+				len = 256;
+			}
+
+			regions.Add((addr, len));
+		}
+
+		if (regions.Count == 0)
+		{
+			return;
+		}
+
+		var memory = context.Memory;
+		var dumper = new Thread(() =>
+		{
+			var remaining = new List<(ulong Address, int Length)>(regions);
+			var attempts = 0;
+			while (remaining.Count > 0 && attempts < 5_000_000)
+			{
+				attempts++;
+				for (var i = remaining.Count - 1; i >= 0; i--)
+				{
+					var (address, length) = remaining[i];
+					var buffer = new byte[length];
+					if (!memory.TryRead(address, buffer))
+					{
+						continue;
+					}
+
+					var allZero = true;
+					for (var b = 0; b < length && allZero; b++)
+					{
+						allZero = buffer[b] == 0;
+					}
+
+					if (allZero)
+					{
+						continue; // region mapped but the code is not loaded yet
+					}
+
+					var hex = new System.Text.StringBuilder(length * 3);
+					for (var b = 0; b < length; b++)
+					{
+						hex.Append(buffer[b].ToString("X2")).Append(' ');
+					}
+
+					Console.Error.WriteLine(
+						$"[LOADER][CODEDUMP] addr=0x{address:X16} len={length} bytes={hex}");
+					remaining.RemoveAt(i);
+				}
+
+				Thread.SpinWait(8000);
+			}
+		})
+		{
+			IsBackground = true,
+			Name = "sharpemu-code-dump",
+		};
+		dumper.Start();
 	}
 
 	private unsafe static int CallNativeEntry(void* entry)
