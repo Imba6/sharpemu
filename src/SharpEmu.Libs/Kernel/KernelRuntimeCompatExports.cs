@@ -823,13 +823,6 @@ public static class KernelRuntimeCompatExports
                     $"[LOADER][TRACE] vrange_reuse_stale addr=0x{releasedAddress:X16} " +
                     $"word0=0x{staleWord0:X16} word1=0x{staleWord1:X16}");
             }
-
-            // A range recycled from a prior munmap still carries that owner's bytes —
-            // KernelMunmap does not decommit and reservation does not re-commit here —
-            // but real PS5 hands back zero-filled memory for a fresh anonymous
-            // reservation. Zero it so the guest allocator never builds new objects on
-            // stale headers/pointers (observed as Unity intrusive-list corruption).
-            KernelMemoryCompatExports.ZeroGuestRange(ctx, releasedAddress, length);
         }
         else if (alreadyBacked)
         {

@@ -294,20 +294,9 @@ public static partial class KernelMemoryCompatExports
                 DirectStart: 0));
         }
 
-        return ZeroGuestRange(ctx, address, mappedLength);
-    }
-
-    /// <summary>
-    /// Zero-fills a mapped guest range in chunks. A fresh anonymous mapping on PS5
-    /// (and a range recycled through munmap + a new reservation) reads back as zero;
-    /// callers that hand a range to the guest as "fresh" use this so the guest never
-    /// observes stale contents left behind by a prior owner.
-    /// </summary>
-    internal static bool ZeroGuestRange(CpuContext ctx, ulong address, ulong length)
-    {
-        for (ulong offset = 0; offset < length;)
+        for (ulong offset = 0; offset < mappedLength;)
         {
-            var chunkLength = (int)Math.Min((ulong)_zeroChunk.Length, length - offset);
+            var chunkLength = (int)Math.Min((ulong)_zeroChunk.Length, mappedLength - offset);
             if (!ctx.Memory.TryWrite(address + offset, _zeroChunk.AsSpan(0, chunkLength)))
             {
                 return false;

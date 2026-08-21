@@ -301,33 +301,6 @@ public sealed class KernelMemoryCompatExportsTests
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, result);
     }
 
-    // Guards the zero-on-reuse fix's primitive: a virtual range recycled from a
-    // prior munmap must be handed back zero-filled (real PS5 gives zeroed memory for
-    // a fresh anonymous reservation), so the guest allocator never rebuilds objects
-    // on a previous owner's stale header/pointer bytes.
-    [Fact]
-    public void ZeroGuestRange_ClearsStalePreviouslyWrittenBytes()
-    {
-        const ulong memoryBase = 0x1_0000_0000;
-        const ulong address = memoryBase + 0x100;
-        const int length = 0x400;
-        var memory = new FakeCpuMemory(memoryBase, 0x1000);
-        var context = new CpuContext(memory, Generation.Gen5);
-
-        var stale = new byte[length];
-        for (var i = 0; i < stale.Length; i++)
-        {
-            stale[i] = (byte)(0xA0 | (i & 0x0F));
-        }
-
-        Assert.True(memory.TryWrite(address, stale));
-        Assert.True(KernelMemoryCompatExports.ZeroGuestRange(context, address, length));
-
-        var readback = new byte[length];
-        Assert.True(memory.TryRead(address, readback));
-        Assert.All(readback, b => Assert.Equal((byte)0, b));
-    }
-
     [Fact]
     public void VirtualQuery_PreservesReservationPastFixedCommitAtSameBase()
     {
