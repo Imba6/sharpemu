@@ -814,6 +814,15 @@ public static class KernelRuntimeCompatExports
         if (reusedReleasedRange)
         {
             mappedAddress = releasedAddress;
+            TraceVRangeLifetime("reuse", releasedAddress, length);
+            if (TraceVRangeReuseEnabled &&
+                ctx.TryReadUInt64(releasedAddress, out var staleWord0) &&
+                ctx.TryReadUInt64(releasedAddress + 8, out var staleWord1))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] vrange_reuse_stale addr=0x{releasedAddress:X16} " +
+                    $"word0=0x{staleWord0:X16} word1=0x{staleWord1:X16}");
+            }
         }
         else if (alreadyBacked)
         {
@@ -2115,6 +2124,31 @@ public static class KernelRuntimeCompatExports
     private static bool ShouldTraceVirtualMemory()
     {
         return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIRTUAL_MEMORY"), "1", StringComparison.Ordinal);
+    }
+
+    // Focused, low-overhead lifetime tracer (default OFF, SHARPEMU_TRACE_VRANGE_REUSE=1):
+    // logs ONLY the virtual-range danger events — a range being released (munmap) and
+    // a released range being recycled into a new reservation — so a crash address can
+    // be correlated against reuse without the per-allocation grow spam that slows the
+    // guest. Real PS5 hands back zeroed memory for a fresh reservation; the reused path
+    // currently does not zero, so a recycled range carries stale contents.
+    internal static readonly bool TraceVRangeReuseEnabled =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VRANGE_REUSE"), "1", StringComparison.Ordinal);
+
+    private static long _vrangeReuseSeq;
+
+    internal static void TraceVRangeLifetime(string op, ulong address, ulong length)
+    {
+        if (!TraceVRangeReuseEnabled)
+        {
+            return;
+        }
+
+        var seq = System.Threading.Interlocked.Increment(ref _vrangeReuseSeq);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] vrange_lifetime#{seq} op={op} " +
+            $"addr=0x{address:X16} end=0x{address + length:X16} len=0x{length:X16} " +
+            $"thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16}");
     }
     [SysAbiExport(
         Nid = "QvsZxomvUHs",

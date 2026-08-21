@@ -3552,6 +3552,7 @@ public static partial class KernelMemoryCompatExports
         if (physicallyBacked || removedAny)
         {
             KernelRuntimeCompatExports.RegisterReleasedVirtualRange(address, length);
+            KernelRuntimeCompatExports.TraceVRangeLifetime("munmap", address, length);
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
