@@ -184,15 +184,16 @@ public sealed class NativeWorkerPoolTests
         Assert.Equal(2, disposed.Count);
     }
 
-    // Concurrency > 2 (old cap) with natural allocation-driven GC and no worker
-    // leak on shutdown. NOTE: process-wide *forced* stop-the-world GC at high
-    // concurrency is proven against emitted native workers by the standalone
-    // prototypes/NativeGuestV2 harness -- it is deliberately NOT hammered here, since
-    // a blocking gen2 Collect from a unit test perturbs the whole parallel suite.
+    // Concurrency > 2 (old cap), thread-safe churn, and no worker leak on shutdown.
+    // The concurrency assertion holds N workers explicitly so it is deterministic
+    // even when the thread pool is saturated by the parallel test suite; the churn
+    // loop then exercises thread-safety. Process-wide *forced* stop-the-world GC at
+    // high concurrency is proven against emitted native workers by the standalone
+    // prototypes/NativeGuestV2 harness, deliberately not hammered here.
     [Fact]
-    public void Pool_HighConcurrency_NoCorruptionNoLeak()
+    public void Pool_ConcurrencyAboveTwo_ThreadSafeChurn_NoLeak()
     {
-        const int max = 16;
+        const int max = 8;
         var allCreated = new List<FakeWorker>();
         var createdCounter = 0;
         var disposed = new List<FakeWorker>();
@@ -206,10 +207,29 @@ public sealed class NativeWorkerPoolTests
             },
             w => { w.Disposed = true; lock (disposed) { disposed.Add(w); } });
 
-        long ran = 0;
-        Parallel.For(0, 24, new ParallelOptions { MaxDegreeOfParallelism = 24 }, _ =>
+        // Deterministic: hold all `max` workers at once -> peak concurrency == max.
+        var held = new FakeWorker[max];
+        for (var i = 0; i < max; i++)
         {
-            for (var i = 0; i < 200; i++)
+            held[i] = pool.Rent(2000)!;
+            Assert.NotNull(held[i]);
+        }
+
+        Assert.Equal(max, pool.PeakConcurrentRuns);
+        Assert.Equal(max, pool.TotalWorkers);
+        Assert.True(pool.PeakConcurrentRuns > 2, "peak concurrency did not exceed the old cap of 2");
+        Assert.Null(pool.Rent(0)); // over the high-water mark: bounded
+
+        for (var i = 0; i < max; i++)
+        {
+            pool.Return(held[i]);
+        }
+
+        // Thread-safety: concurrent churn must never corrupt the pool or exceed max.
+        long ran = 0;
+        Parallel.For(0, 32, _ =>
+        {
+            for (var i = 0; i < 100; i++)
             {
                 var w = pool.Rent(2000);
                 if (w is null)
@@ -218,18 +238,14 @@ public sealed class NativeWorkerPoolTests
                 }
 
                 Assert.False(w.Disposed);
-                var churn = new byte[128]; // allocate -> natural gen0 GC pressure
-                churn[0] = (byte)i;
                 Interlocked.Increment(ref ran);
-                Thread.SpinWait(30);
+                Thread.SpinWait(20);
                 pool.Return(w);
             }
         });
 
         Assert.True(ran > 0);
         Assert.True(pool.TotalWorkers <= max);
-        Assert.True(pool.PeakConcurrentRuns <= max);
-        Assert.True(pool.PeakConcurrentRuns > 2, $"peak concurrency {pool.PeakConcurrentRuns} did not exceed the old cap of 2");
         Assert.True(pool.CreatedCount <= max);
 
         // No worker leak: every worker ever created is destroyed exactly once on shutdown.

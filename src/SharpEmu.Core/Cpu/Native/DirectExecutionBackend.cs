@@ -4571,7 +4571,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		try
 		{
 			LastError = null;
-			var exitReason = ExecuteGuestThreadEntry(context, entryPoint, reason, out var callbackReason);
+			// Nested host->guest re-entry stays inline (reentrant): it already runs on the
+			// caller's native base under V2, and inline preserves on-thread 0x1E host-park
+			// delivery (this path serves TryDeliverQueuedGuestException).
+			var exitReason = ExecuteGuestThreadEntry(context, entryPoint, reason, out var callbackReason, reentrant: true);
 			if (exitReason == GuestNativeCallExitReason.Blocked &&
 				!ResumeBlockedNestedGuestCallback(context, reason, ref exitReason, ref callbackReason))
 			{
@@ -4711,7 +4714,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				callbackContext,
 				continuation,
 				reason,
-				out callbackReason);
+				out callbackReason,
+				reentrant: true);
 		}
 
 		if (exitReason == GuestNativeCallExitReason.Blocked && ActiveForcedGuestExit)
@@ -4808,7 +4812,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					continuation.Rip,
 					continuation.ReturnSlotAddress,
 					reason,
-					out callbackReason);
+					out callbackReason,
+					reentrant: true);
 				callbackLastError = LastError;
 			}
 			catch (Exception ex)
@@ -6098,7 +6103,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		CpuContext context,
 		GuestCpuContinuation continuation,
 		string name,
-		out string? reason)
+		out string? reason,
+		bool reentrant = false)
 	{
 		TraceFocusedContinuation(
 			"execute",
@@ -6111,7 +6117,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			continuation.Rip,
 			continuation.ReturnSlotAddress,
 			name,
-			out reason);
+			out reason,
+			reentrant);
 	}
 
 	// Phase-1 continuation instrumentation (default OFF). Enabled with
@@ -6223,7 +6230,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		context.Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr;
 	}
 
-	private unsafe GuestNativeCallExitReason ExecuteGuestThreadEntry(CpuContext context, ulong entryPoint, string name, out string? reason)
+	private unsafe GuestNativeCallExitReason ExecuteGuestThreadEntry(CpuContext context, ulong entryPoint, string name, out string? reason, bool reentrant = false)
 	{
 		reason = null;
 		if (context[CpuRegister.Rsp] == 0)
@@ -6384,11 +6391,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ActiveGuestThreadYieldReason = null;
 			try
 			{
-				// TBB execute-AV recover needs native-worker TLS (eligible/done).
-				// Other guests stay on CallNativeEntry — full native-worker migration
-				// increased splash hangs / UnmanagedCallersOnly (tLTN/tLTO).
+				// tbb_thead always runs on a native worker (execute-AV recover needs its
+				// TLS). Under SHARPEMU_NATIVE_GUEST_V2 an ordinary TOP-LEVEL guest pthread
+				// run does too, so its guest frames never sit above CLR-managed frames on a
+				// GC-managed thread. Nested/reentrant runs stay inline (see
+				// ShouldRunGuestOnNativeWorker). The main ExecuteEntry path is untouched.
 				int nativeReturn;
-				if (name == "tbb_thead")
+				if (ShouldRunGuestOnNativeWorker(name, reentrant))
 				{
 					nativeReturn = RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true);
 				}
@@ -6460,7 +6469,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong entryPoint,
 		ulong returnSlotAddress,
 		string name,
-		out string? reason)
+		out string? reason,
+		bool reentrant = false)
 	{
 		reason = null;
 		if (context[CpuRegister.Rsp] == 0)
@@ -6565,7 +6575,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			try
 			{
 				int nativeReturn;
-				if (name == "tbb_thead")
+				if (ShouldRunGuestOnNativeWorker(name, reentrant))
 				{
 					nativeReturn = RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true);
 				}

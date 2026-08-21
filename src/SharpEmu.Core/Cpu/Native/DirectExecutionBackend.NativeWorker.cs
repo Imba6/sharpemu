@@ -29,6 +29,26 @@ public sealed partial class DirectExecutionBackend
 	private static readonly bool NativeGuestWorkersDisabled =
 		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_NATIVE_GUEST_WORKERS"), "1", StringComparison.Ordinal);
 
+	// Native Guest Execution V2 stage 3 (gated, default off): route ordinary
+	// TOP-LEVEL guest pthread execution onto the native-worker pool -- exactly the
+	// path tbb_thead already takes -- so guest frames never sit above CLR-managed
+	// frames on a GC-managed thread. NESTED/reentrant runs stay inline: for a routed
+	// pthread they already run on the worker's native base (GC-safe, per the V2
+	// prototype), and keeping them inline preserves on-thread 0x1E host-park delivery
+	// (TryDeliverQueuedGuestException -> TryCallGuestFunction is reentrant). The main
+	// ExecuteEntry is deliberately untouched (that is stage 4).
+	internal static readonly bool NativeGuestV2Enabled =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_GUEST_V2"), "1", StringComparison.Ordinal);
+
+	private bool ShouldRunGuestOnNativeWorker(string name, bool reentrant) =>
+		ShouldRunGuestOnNativeWorker(name, reentrant, NativeGuestV2Enabled);
+
+	// tbb_thead always runs on a native worker; V2 additionally routes ordinary
+	// TOP-LEVEL (non-reentrant) guest pthread runs. Nested/reentrant runs and (when
+	// V2 is off) all ordinary runs stay inline. Pure decision, exposed for tests.
+	internal static bool ShouldRunGuestOnNativeWorker(string name, bool reentrant, bool v2Enabled) =>
+		name == "tbb_thead" || (v2Enabled && !reentrant);
+
 	// High-water mark for concurrent native-worker runs (= peak live OS worker
 	// threads). Native Guest Execution V2 stage 2 replaced the historical fixed cap
 	// of 2 with a grow-on-demand NativeWorkerPool. That cap existed only to throttle
@@ -180,13 +200,13 @@ public sealed partial class DirectExecutionBackend
 		try
 		{
 			var state = _activeGuestThreadState;
-			if (state is { Name: "tbb_thead" })
+			if (state is { Name: var runName } && (runName == "tbb_thead" || NativeGuestV2Enabled))
 			{
 				var n = Interlocked.Increment(ref _tbbNativeRunEnterCount);
-				if (n <= 12 || n % 64 == 0)
+				if (n <= 16 || n % 128 == 0)
 				{
 					Console.Error.WriteLine(
-						$"[LOADER][INFO] tbb_run_enter #{n} native_tid_pending handle=0x{state.ThreadHandle:X16} " +
+						$"[LOADER][INFO] native_run_enter #{n} name='{runName}' handle=0x{state.ThreadHandle:X16} " +
 						$"pool_max={NativeWorkerMax} peak_concurrent={pool!.PeakConcurrentRuns} live_workers={pool.TotalWorkers}");
 					Console.Error.Flush();
 				}
