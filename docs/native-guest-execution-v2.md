@@ -308,17 +308,47 @@ launch.
 
 ## 6. Migration plan (staged, post-proof)
 
-1. **Prototype proof** (this doc's harness) — no emulator changes.
-2. **Pool hardening** — replace `_nativeWorkerRunLimiter` with a grow-on-demand pool
-   bounded by a concurrency high-water mark, keep never-throw/soft-fail; validate tbb
-   (Astro) still boots.
-3. **Route ordinary guest pthreads** (`RunGuestThread`) to the worker path behind a flag
-   (`SHARPEMU_NATIVE_GUEST_V2=1`); keep inline as fallback. Validate Cocoon + cross-title.
-4. **Route the main entry** (`ExecuteEntry`) to the worker path. Validate.
-5. **Flip the default**, keep the inline path as an env-gated escape hatch for one
-   release.
-Each stage is a separate small commit with its own validation; no stage lands without
-the prior stage's cross-title pass.
+1. **Prototype proof** (this doc's harness) — no emulator changes. ✅ (298e01c)
+2. **Pool hardening** — grow-on-demand pool bounded by a high-water mark, never-throw.
+   ✅ (7fb127e)
+3. **Route ordinary guest pthreads** (`RunGuestThread`) to the worker path behind
+   `SHARPEMU_NATIVE_GUEST_V2=1`; nested/reentrant stay inline. ✅ (045212e) — Cocoon +
+   cross-title clean; ordinary pthreads no longer the crash site.
+4. **Route the main entry** (`ExecuteEntry`) to the worker path. ⛔ **ABANDONED — see 6a.**
+5. **Flip the default** — blocked on 6a.
+
+### 6a. Stage-4 finding: the remaining crash is the 0x1E host-park delivery, not top-level inline
+
+Routing the main `ExecuteEntry` to a worker (preserving host-park: main is not a
+cooperative logical guest thread, `CurrentGuestThreadHandle==0`, so it host-parks and
+stays pinned to one worker) is **mechanically clean** — no deadlock, host-park + 0x1E
+self-consistent on the worker, Cocoon still reaches 30fps. But it **REGRESSED the crash
+rate to 10/10** (vs stage-3 3/5, baseline ~5/5) and was reverted.
+
+Flight recorder proved why: the remaining UCO crash is **not** the top-level inline
+execution — it is the **il2cpp Boehm GC-suspend (0x1E) host-park delivery** on the main
+guest. The main guest is the collector's suspend *target*, so during the stop-the-world
+storm it takes many `EnterInterruptibleHostPark` → `ServiceHostParkInterrupt` →
+`TryDeliverQueuedGuestException` → `TryCallGuestFunction` deliveries, each running the
+guest handler with a **deep managed frame chain below it** (the HLE wait's
+`Monitor.Wait`, the service call, `TryCallGuestFunction`). That nested-guest-above-
+managed-frames shape faults under the concurrent .NET GC **regardless of whether the
+top-level thread is the CLR main thread or a worker** — moving the top level to a worker
+does not remove those managed frames, and the worker's `Monitor.Wait` host-park + nested
+reverse-P/Invoke during GC is if anything *more* fault-prone. Ordinary pthreads never hit
+this because they **yield cooperatively** (`RequestCurrentThreadBlock`) and receive 0x1E
+via continuation-resume, never via a host-park nested delivery — which is exactly why
+stage 3 succeeded and stage 4 did not.
+
+**Revised next step (Stage 5, separate architecture change — do not fold in):** make the
+main guest a **cooperative logical guest thread** (its own `GuestThreadState` +
+scheduler resume path) so it yields on block and receives 0x1E via continuation resume
+like an ordinary pthread, eliminating the host-park nested delivery entirely. This
+re-opens the concern the host-park interrupt fix (28cab08) originally solved (the main
+thread had no cooperative continuation), so it must be designed carefully and may need
+the primary thread wired through the ready-queue/continuation machinery. Only after that
+does routing the main entry to a worker (step 4) become meaningful. Until then the main
+entry **stays inline** and its 0x1E host-park crash is the known remaining blocker.
 
 ---
 
