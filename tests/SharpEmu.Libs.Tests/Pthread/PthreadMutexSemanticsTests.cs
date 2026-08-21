@@ -198,6 +198,95 @@ public sealed class PthreadMutexSemanticsTests
         Assert.Equal(workerCount * iterationsPerWorker, protectedCounter);
     }
 
+    // Heavy-contention analogue of the Unity PlatformMutex.cpp crash: many guest
+    // threads share ONE mutex that guards a non-thread-safe intrusive doubly-linked
+    // list, and each critical section inserts then unlinks a node — the exact shape
+    // that faulted in Hotline Miami (a node unlinked with next!=null, prev==null).
+    // If the primitive ever lets two guest threads hold the mutex at once, either
+    // the sentinel owner check trips, the LinkedList corrupts/throws, or the final
+    // count/emptiness assertions fail. Exercises the shared ownership core
+    // (TryAcquireOwner / TryGrantMutexWaiterLocked) that both the cooperative and
+    // host-wait block paths funnel through.
+    [Fact]
+    public async Task ContendedMutex_HeavyContention_PreservesListIntegrityUnderUnlink()
+    {
+        const ulong memoryBase = 0x4_0000_0000;
+        const ulong mutexAddress = memoryBase + 0x100;
+        const int workerCount = 12;
+        const int iterationsPerWorker = 50_000;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var initializationContext = new CpuContext(memory, Generation.Gen5);
+        Assert.True(initializationContext.TryWriteUInt64(mutexAddress, 1));
+        initializationContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(initializationContext));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(initializationContext));
+
+        using var start = new ManualResetEventSlim(false);
+        var insideCriticalSection = 0;
+        var mutualExclusionViolations = 0;
+        var listViolations = 0;
+        long protectedCounter = 0;
+        // Guarded solely by the guest mutex; deliberately NOT a concurrent collection.
+        var sharedList = new LinkedList<long>();
+        // Keep a couple of resident nodes so every insert/unlink is a real interior
+        // list splice (next and prev both non-null), matching the crash's unlink.
+        sharedList.AddLast(-1L);
+        sharedList.AddLast(-2L);
+
+        var workers = Enumerable.Range(0, workerCount)
+            .Select(worker => Task.Factory.StartNew(
+                () =>
+                {
+                    var context = new CpuContext(memory, Generation.Gen5);
+                    context[CpuRegister.Rdi] = mutexAddress;
+                    start.Wait();
+                    for (var iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        if (KernelPthreadCompatExports.PthreadMutexLock(context) != 0)
+                        {
+                            throw new InvalidOperationException("pthread mutex lock failed during list-unlink stress.");
+                        }
+
+                        if (Interlocked.Increment(ref insideCriticalSection) != 1)
+                        {
+                            Interlocked.Increment(ref mutualExclusionViolations);
+                        }
+
+                        // Splice a node between the two resident nodes, then unlink it.
+                        var node = sharedList.AddAfter(sharedList.First!, worker);
+                        if (node.Previous is null || node.Next is null)
+                        {
+                            Interlocked.Increment(ref listViolations);
+                        }
+
+                        sharedList.Remove(node);
+                        if (node.List is not null)
+                        {
+                            Interlocked.Increment(ref listViolations);
+                        }
+
+                        protectedCounter++;
+                        Interlocked.Decrement(ref insideCriticalSection);
+
+                        if (KernelPthreadCompatExports.PthreadMutexUnlock(context) != 0)
+                        {
+                            throw new InvalidOperationException("pthread mutex unlock failed during list-unlink stress.");
+                        }
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
+            .ToArray();
+
+        start.Set();
+        await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(0, Volatile.Read(ref mutualExclusionViolations));
+        Assert.Equal(0, Volatile.Read(ref listViolations));
+        Assert.Equal((long)workerCount * iterationsPerWorker, protectedCounter);
+        Assert.Equal(2, sharedList.Count); // only the two resident nodes remain
+    }
+
     /// <summary>
     /// A ScePthreadMutex variable is storage the guest owns and reuses — stack
     /// frames recycle the slot, and a slot can be reassigned to another mutex —
