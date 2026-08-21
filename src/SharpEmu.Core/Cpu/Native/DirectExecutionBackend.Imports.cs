@@ -2204,30 +2204,47 @@ public sealed partial class DirectExecutionBackend
 	/// <summary>
 	/// ABI-independent dlsym resolution shared by every dlsym entry point.
 	/// </summary>
+	private static long _dlsymTraceSeq;
+
 	private bool TryResolveDlsymSymbol(int moduleHandle, string symbolName, out ulong address)
 	{
-		if (TryResolveModuleSymbolAddress(moduleHandle, symbolName, out address) ||
+		var resolved =
+			TryResolveModuleSymbolAddress(moduleHandle, symbolName, out address) ||
 			TryResolveRuntimeSymbolAddress(symbolName, out address) ||
 			TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out address) ||
 			TryResolveRuntimeSymbolAlias(symbolName, out address) ||
 			TryResolveKernelDlsymSelfAddress(symbolName, out address) ||
 			// Last: an HLE export the guest never statically imported has no
 			// import stub to hand back, so materialize one.
-			TryResolveDynamicHleThunkAddress(symbolName, out address))
-		{
-			if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
-			{
-				Console.Error.WriteLine(
-					$"[LOADER][TRACE] dlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{address:X16}");
-			}
+			TryResolveDynamicHleThunkAddress(symbolName, out address);
 
-			return true;
+		if (!resolved)
+		{
+			address = 0;
 		}
 
-		Console.Error.WriteLine(
-			$"[LOADER][WARN] dlsym failed: handle=0x{moduleHandle:X} symbol='{symbolName}'");
-		address = 0;
-		return false;
+		// Bounded dlsym registry: module name + caller RIP + sequence so a NULL a
+		// later crash dereferences can be traced back to the exact dlsym result
+		// (which module a plugin symbol was requested from, and whether it resolved).
+		// Failures stay always-logged (the previous behaviour); successes are added
+		// only under SHARPEMU_LOG_DLSYM=1 so the always-on path is unchanged in volume.
+		if (!resolved ||
+			string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
+		{
+			var moduleName = KernelModuleRegistry.TryGetModuleByHandle(moduleHandle, out var module)
+				? module.Name
+				: "<none>";
+			var callerRip = _activeGuestThreadState is { } thread
+				? Volatile.Read(ref thread.LastReturnRip)
+				: 0UL;
+			var seq = Interlocked.Increment(ref _dlsymTraceSeq);
+			Console.Error.WriteLine(
+				$"[LOADER][{(resolved ? "TRACE" : "WARN")}] dlsym#{seq} {(resolved ? "ok" : "FAIL")} " +
+				$"handle=0x{moduleHandle:X} module='{moduleName}' symbol='{symbolName}' " +
+				$"-> 0x{address:X16} callerRip=0x{callerRip:X16}");
+		}
+
+		return resolved;
 	}
 
 	private static bool TryResolveModuleSymbolAddress(int moduleHandle, string symbolName, out ulong address)
