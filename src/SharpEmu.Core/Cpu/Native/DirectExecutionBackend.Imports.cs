@@ -209,6 +209,10 @@ public sealed partial class DirectExecutionBackend
 			return 18446744071562199042uL;
 		}
 		ImportStubEntry importStubEntry = importEntries[importIndex];
+		if (UcoFlightEnabled)
+		{
+			UcoImport(importStubEntry.Nid, importStubEntry.Export?.Name, cpuContext.Rip);
+		}
 		if (_perfHleHistogram)
 		{
 			RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid);

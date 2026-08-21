@@ -6398,7 +6398,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						reason = "failed to bind host-RSP storage for guest thread stub";
 						return GuestNativeCallExitReason.Exception;
 					}
-					nativeReturn = CallNativeEntry(ptr);
+					if (UcoFlightEnabled)
+					{
+						UcoGuestEnter(name, 0);
+					}
+					try
+					{
+						nativeReturn = CallNativeEntry(ptr);
+					}
+					finally
+					{
+						if (UcoFlightEnabled)
+						{
+							UcoGuestExit(name);
+						}
+					}
 				}
 				if (ActiveGuestThreadYieldRequested)
 				{
