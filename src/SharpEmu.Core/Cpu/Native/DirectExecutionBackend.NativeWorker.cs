@@ -29,31 +29,95 @@ public sealed partial class DirectExecutionBackend
 	private static readonly bool NativeGuestWorkersDisabled =
 		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_NATIVE_GUEST_WORKERS"), "1", StringComparison.Ordinal);
 
-	// Cap concurrent native-worker Runs. Astro's tbb_thead burst overlaps many
-	// UnmanagedCallersOnly prologues; a large prewarm + unbounded concurrency
-	// FailFasts (0xC0000409) mid-storm with no VEH breadcrumb. Pool size and
-	// in-flight Runs are separate knobs.
-	private static readonly int NativeWorkerMaxConcurrent = ReadNativeWorkerMaxConcurrent();
+	// High-water mark for concurrent native-worker runs (= peak live OS worker
+	// threads). Native Guest Execution V2 stage 2 replaced the historical fixed cap
+	// of 2 with a grow-on-demand NativeWorkerPool. That cap existed only to throttle
+	// a create/fault storm (commit 96fde57): a THROWN worker/prologue fault killed
+	// the process mid tbb_thead burst. That root cause is already mitigated --
+	// RunPrologue/RunEpilogue and RunGuestEntryStub soft-return and never throw -- and
+	// the V2 prototype (prototypes/NativeGuestV2) proved the model GC-safe to 53
+	// concurrent workers under forced Workstation/Server GC.
+	//
+	// Default = host logical CPU count clamped to [8,64]: tbb bursts and (later)
+	// all-guest routing rarely run more workers concurrently than there are cores,
+	// while the ceiling bounds OS-thread growth. Override with
+	// SHARPEMU_NATIVE_WORKER_MAX; SHARPEMU_NATIVE_WORKER_MAX_CONCURRENT is kept as a
+	// back-compat alias (e.g. set either to 2 to restore the old behaviour).
+	private static readonly int NativeWorkerMax = ReadNativeWorkerMax();
 
-	private static int ReadNativeWorkerMaxConcurrent()
+	// tbb runs wait this long for a free run slot before soft-failing; ordinary
+	// (fallback-eligible) runs never wait (0) and drop to inline instead.
+	private const int NativeWorkerRentTimeoutMs = 2000;
+
+	private static int ReadNativeWorkerMax()
 	{
-		if (int.TryParse(
-			    Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_WORKER_MAX_CONCURRENT"),
-			    out var parsed) &&
-		    parsed > 0)
+		foreach (var name in (ReadOnlySpan<string>)
+			["SHARPEMU_NATIVE_WORKER_MAX", "SHARPEMU_NATIVE_WORKER_MAX_CONCURRENT"])
 		{
-			return Math.Clamp(parsed, 1, 64);
+			if (int.TryParse(Environment.GetEnvironmentVariable(name), out var parsed) && parsed > 0)
+			{
+				return Math.Clamp(parsed, 1, 256);
+			}
 		}
 
-		return 2;
+		return Math.Clamp(Environment.ProcessorCount, 8, 64);
 	}
 
-	private readonly object _nativeWorkerGate = new();
-	private readonly List<NativeGuestExecutor> _allNativeWorkers = new();
-	private readonly Stack<NativeGuestExecutor> _idleNativeWorkers = new();
-	private readonly SemaphoreSlim _nativeWorkerRunLimiter = new(NativeWorkerMaxConcurrent);
-	private bool _nativeWorkersDisposed;
+	private readonly object _workerPoolInitGate = new();
+	private NativeWorkerPool<NativeGuestExecutor>? _workerPool;
+	private bool _workerPoolShutdown;
 	private int _nativeWorkerCreationFailedLogged;
+
+	// Lazily creates the pool the first time native workers are needed; returns null
+	// on POSIX / when workers are disabled / after shutdown, so callers fall back to
+	// inline execution or soft-fail.
+	private NativeWorkerPool<NativeGuestExecutor>? EnsureWorkerPool()
+	{
+		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
+		{
+			return null;
+		}
+
+		var pool = Volatile.Read(ref _workerPool);
+		if (pool is not null)
+		{
+			return pool;
+		}
+
+		lock (_workerPoolInitGate)
+		{
+			if (_workerPoolShutdown)
+			{
+				return null;
+			}
+
+			pool = _workerPool;
+			if (pool is null)
+			{
+				pool = new NativeWorkerPool<NativeGuestExecutor>(
+					NativeWorkerMax, CreateNativeWorker, static w => w.Dispose());
+				Volatile.Write(ref _workerPool, pool);
+				Console.Error.WriteLine(
+					$"[LOADER][INFO] Native guest worker pool: max_workers={NativeWorkerMax} " +
+					$"(cpu={Environment.ProcessorCount})");
+				Console.Error.Flush();
+			}
+
+			return pool;
+		}
+	}
+
+	private NativeGuestExecutor? CreateNativeWorker()
+	{
+		var worker = NativeGuestExecutor.TryCreate(this);
+		if (worker is null && Interlocked.Exchange(ref _nativeWorkerCreationFailedLogged, 1) == 0)
+		{
+			Console.Error.WriteLine(
+				"[LOADER][WARN] Failed to create a native guest worker thread; falling back to inline guest execution.");
+		}
+
+		return worker;
+	}
 
 	private const uint StackSizeParamIsAReservation = 0x00010000u;
 
@@ -81,96 +145,73 @@ public sealed partial class DirectExecutionBackend
 	// copied back into this thread's statics before returning.
 	private unsafe int RunGuestEntryStub(void* entryStub, ulong hostRspSlot, bool requireNativeWorker = false)
 	{
-		// Limit in-flight native Runs before renting so the idle pool is not
-		// drained by threads blocked on the concurrency gate.
-		_nativeWorkerRunLimiter.Wait();
-		NativeGuestExecutor? worker = null;
+		// Rent a worker from the grow-on-demand pool. The pool's run-slot semaphore
+		// bounds concurrent runs (= peak OS worker threads) at NativeWorkerMax and
+		// makes an over-cap caller BLOCK for a slot rather than storm-create threads
+		// or busy-poll. A tbb run waits up to NativeWorkerRentTimeoutMs; an ordinary
+		// run tries once (timeout 0) and drops to inline if none is free.
+		var pool = EnsureWorkerPool();
+		var worker = pool?.Rent(requireNativeWorker ? NativeWorkerRentTimeoutMs : 0);
+		if (worker is null)
+		{
+			if (requireNativeWorker)
+			{
+				// Never fall back to managed inline for tbb (FailFast) and never throw
+				// (an uncaught throw mid-storm was a silent process die); soft-return.
+				var n = Interlocked.Increment(ref _tbbNativeWorkerRefuseCount);
+				if (n <= 8 || n % 32 == 0)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][ERROR] tbb_native_worker unavailable #{n} (pool max={NativeWorkerMax}); " +
+						"skipping run (no managed inline, no throw)");
+					Console.Error.Flush();
+				}
+
+				_activeGuestThreadYieldRequested = true;
+				_activeGuestThreadYieldReason = "tbb_native_worker_unavailable";
+				_activeForcedGuestExit = true;
+				return unchecked((int)0x80020012);
+			}
+
+			TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
+			return CallNativeEntry(entryStub);
+		}
+
 		try
 		{
-			// Astro can spawn a burst of tbb_thead while workers are still in
-			// TerminateThread+respawn. Wait for a native worker — never fall back
-			// to managed inline (FailFast) and never throw (uncaught throw mid-
-			// storm was a silent process die).
-			var maxAttempts = requireNativeWorker ? 500 : 48;
-			for (var attempt = 0; attempt < maxAttempts; attempt++)
+			var state = _activeGuestThreadState;
+			if (state is { Name: "tbb_thead" })
 			{
-				worker = RentNativeGuestExecutor();
-				if (worker is not null)
+				var n = Interlocked.Increment(ref _tbbNativeRunEnterCount);
+				if (n <= 12 || n % 64 == 0)
 				{
-					break;
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] tbb_run_enter #{n} native_tid_pending handle=0x{state.ThreadHandle:X16} " +
+						$"pool_max={NativeWorkerMax} peak_concurrent={pool!.PeakConcurrentRuns} live_workers={pool.TotalWorkers}");
+					Console.Error.Flush();
 				}
-
-				if (!requireNativeWorker)
-				{
-					break;
-				}
-
-				Thread.Sleep(attempt < 32 ? 1 : 4);
 			}
 
-			if (worker is null)
-			{
-				if (requireNativeWorker)
-				{
-					var n = Interlocked.Increment(ref _tbbNativeWorkerRefuseCount);
-					if (n <= 8 || n % 32 == 0)
-					{
-						Console.Error.WriteLine(
-							$"[LOADER][ERROR] tbb_native_worker unavailable #{n} after {maxAttempts} attempts; " +
-							"skipping run (no managed inline, no throw)");
-						Console.Error.Flush();
-					}
-
-					_activeGuestThreadYieldRequested = true;
-					_activeGuestThreadYieldReason = "tbb_native_worker_unavailable";
-					_activeForcedGuestExit = true;
-					return unchecked((int)0x80020012);
-				}
-
-				TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
-				return CallNativeEntry(entryStub);
-			}
-
-			try
-			{
-				var state = _activeGuestThreadState;
-				if (state is { Name: "tbb_thead" })
-				{
-					var n = Interlocked.Increment(ref _tbbNativeRunEnterCount);
-					if (n <= 12 || n % 64 == 0)
-					{
-						Console.Error.WriteLine(
-							$"[LOADER][INFO] tbb_run_enter #{n} native_tid_pending handle=0x{state.ThreadHandle:X16} " +
-							$"max_concurrent={NativeWorkerMaxConcurrent}");
-						Console.Error.Flush();
-					}
-				}
-
-				var nativeReturn = worker.Run(
-					_activeCpuContext!,
-					state,
-					GuestThreadExecution.CurrentGuestThreadHandle,
-					_activeEntryReturnSentinelRip,
-					_activeGuestReturnSlotAddress,
-					(nint)hostRspSlot,
-					(nint)entryStub,
-					state?.AffinityMask ?? 0,
-					out var yieldRequested,
-					out var yieldReason,
-					out var forcedExit);
-				_activeGuestThreadYieldRequested = yieldRequested;
-				_activeGuestThreadYieldReason = yieldReason;
-				_activeForcedGuestExit = forcedExit;
-				return nativeReturn;
-			}
-			finally
-			{
-				ReturnNativeGuestExecutor(worker);
-			}
+			var nativeReturn = worker.Run(
+				_activeCpuContext!,
+				state,
+				GuestThreadExecution.CurrentGuestThreadHandle,
+				_activeEntryReturnSentinelRip,
+				_activeGuestReturnSlotAddress,
+				(nint)hostRspSlot,
+				(nint)entryStub,
+				state?.AffinityMask ?? 0,
+				out var yieldRequested,
+				out var yieldReason,
+				out var forcedExit);
+			_activeGuestThreadYieldRequested = yieldRequested;
+			_activeGuestThreadYieldReason = yieldReason;
+			_activeForcedGuestExit = forcedExit;
+			return nativeReturn;
 		}
 		finally
 		{
-			_nativeWorkerRunLimiter.Release();
+			pool!.Return(worker);
 		}
 	}
 
@@ -180,120 +221,39 @@ public sealed partial class DirectExecutionBackend
 
 	private void PrewarmNativeGuestWorkers(int count)
 	{
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled || count <= 0)
+		if (count <= 0)
 		{
 			return;
 		}
 
-		var warmed = new List<NativeGuestExecutor>(count);
-		for (var i = 0; i < count; i++)
+		var pool = EnsureWorkerPool();
+		if (pool is null)
 		{
-			var worker = NativeGuestExecutor.TryCreate(this);
-			if (worker is null)
-			{
-				break;
-			}
-
-			warmed.Add(worker);
+			return;
 		}
 
-		lock (_nativeWorkerGate)
-		{
-			if (_nativeWorkersDisposed)
-			{
-				foreach (var worker in warmed)
-				{
-					worker.Dispose();
-				}
-				return;
-			}
-
-			foreach (var worker in warmed)
-			{
-				_allNativeWorkers.Add(worker);
-				_idleNativeWorkers.Push(worker);
-			}
-		}
-
+		var warmed = pool.Prewarm(count);
 		Console.Error.WriteLine(
-			$"[LOADER][INFO] Native guest workers prewarmed: {warmed.Count}/{count} " +
-			$"max_concurrent={NativeWorkerMaxConcurrent}");
+			$"[LOADER][INFO] Native guest workers prewarmed: {warmed}/{count} pool_max={NativeWorkerMax}");
 		Console.Error.Flush();
-	}
-
-	private NativeGuestExecutor? RentNativeGuestExecutor()
-	{
-		// NativeGuestExecutor emits a Win32 wait loop and creates it with
-		// kernel32!CreateThread. POSIX hosts use the established inline entry
-		// path until the worker loop has a pthread/eventfd implementation.
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
-		{
-			return null;
-		}
-		lock (_nativeWorkerGate)
-		{
-			if (_nativeWorkersDisposed)
-			{
-				return null;
-			}
-			if (_idleNativeWorkers.Count > 0)
-			{
-				return _idleNativeWorkers.Pop();
-			}
-		}
-		var worker = NativeGuestExecutor.TryCreate(this);
-		if (worker is null)
-		{
-			if (Interlocked.Exchange(ref _nativeWorkerCreationFailedLogged, 1) == 0)
-			{
-				Console.Error.WriteLine(
-					"[LOADER][WARN] Failed to create a native guest worker thread; falling back to inline guest execution.");
-			}
-			return null;
-		}
-		lock (_nativeWorkerGate)
-		{
-			if (_nativeWorkersDisposed)
-			{
-				worker.Dispose();
-				return null;
-			}
-			_allNativeWorkers.Add(worker);
-		}
-		return worker;
-	}
-
-	private void ReturnNativeGuestExecutor(NativeGuestExecutor worker)
-	{
-		lock (_nativeWorkerGate)
-		{
-			if (!_nativeWorkersDisposed)
-			{
-				_idleNativeWorkers.Push(worker);
-				return;
-			}
-		}
-		worker.Dispose();
 	}
 
 	private void DisposeNativeGuestExecutors()
 	{
-		NativeGuestExecutor[] workers;
-		lock (_nativeWorkerGate)
+		NativeWorkerPool<NativeGuestExecutor>? pool;
+		lock (_workerPoolInitGate)
 		{
-			if (_nativeWorkersDisposed)
+			if (_workerPoolShutdown)
 			{
 				return;
 			}
-			_nativeWorkersDisposed = true;
-			workers = _allNativeWorkers.ToArray();
-			_allNativeWorkers.Clear();
-			_idleNativeWorkers.Clear();
+
+			_workerPoolShutdown = true;
+			pool = _workerPool;
+			_workerPool = null;
 		}
-		foreach (var worker in workers)
-		{
-			worker.Dispose();
-		}
+
+		pool?.Dispose();
 	}
 
 	// A pooled raw OS thread that executes guest entry stubs. The run loop is emitted

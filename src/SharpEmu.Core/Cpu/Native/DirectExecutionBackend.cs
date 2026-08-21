@@ -1317,8 +1317,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				"[LOADER][WARN] Worker abort stub unavailable; TBB execute-fault recover will use host_exit");
 		}
 		SetupExceptionHandler();
-		// Cover the Astro TBB spawn storm (often 8–12 concurrent tbb_thead).
-		PrewarmNativeGuestWorkers(Math.Max(NativeWorkerMaxConcurrent, 4));
+		// Pre-create a modest set so the first tbb runs skip creation latency; the
+		// pool grows on demand up to NativeWorkerMax for the Astro TBB spawn storm.
+		PrewarmNativeGuestWorkers(Math.Min(NativeWorkerMax, 4));
 	}
 
 	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
