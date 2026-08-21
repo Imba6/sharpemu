@@ -5941,18 +5941,65 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			out reason);
 	}
 
+	// Phase-1 continuation instrumentation (default OFF). Enabled with
+	// SHARPEMU_TRACE_FOCUSED_CONTINUATION=1. Logs the full guest nonvolatile
+	// register file each time a blocked continuation is stored ("register") and
+	// resumed ("execute"), keyed by (thread,rip,rsp) so the two lines for one
+	// continuation can be matched and every callee-saved register compared across
+	// the block/resume boundary — the proof tool for the stale-R15 class.
+	// Optional guest-RSP window [LO,HI) focuses on one thread's stack; unset traces
+	// every continuation, bounded by a flood cap so an always-on trace is safe.
+	private static readonly bool _focusedContinuationTraceEnabled =
+		string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FOCUSED_CONTINUATION"),
+			"1",
+			StringComparison.Ordinal);
+
+	private static readonly ulong _focusedContinuationRspLo =
+		ParseNumericEnv("SHARPEMU_TRACE_CONTINUATION_RSP_LO", 0UL);
+
+	private static readonly ulong _focusedContinuationRspHi =
+		ParseNumericEnv("SHARPEMU_TRACE_CONTINUATION_RSP_HI", ulong.MaxValue);
+
+	private static int _focusedContinuationBudget =
+		unchecked((int)ParseNumericEnv("SHARPEMU_TRACE_CONTINUATION_BUDGET", 200000UL));
+
+	// Parses a hex (0x-prefixed or bare hex) or decimal env value; falls back on any
+	// malformed/empty value.
+	private static ulong ParseNumericEnv(string name, ulong fallback)
+	{
+		var raw = Environment.GetEnvironmentVariable(name);
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return fallback;
+		}
+
+		raw = raw.Trim();
+		var span = raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+			? raw.AsSpan(2)
+			: raw.AsSpan();
+		if (ulong.TryParse(span, System.Globalization.NumberStyles.HexNumber, null, out var hex))
+		{
+			return hex;
+		}
+
+		return ulong.TryParse(raw, out var dec) ? dec : fallback;
+	}
+
 	private static void TraceFocusedContinuation(
 		string operation,
 		ulong threadHandle,
 		GuestCpuContinuation continuation,
 		string detail)
 	{
-		if (!string.Equals(
-				Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FOCUSED_CONTINUATION"),
-				"1",
-				StringComparison.Ordinal) ||
-			continuation.Rsp < 0x00006FFFAC000000UL ||
-			continuation.Rsp >= 0x00006FFFAC200000UL)
+		if (!_focusedContinuationTraceEnabled ||
+			continuation.Rsp < _focusedContinuationRspLo ||
+			continuation.Rsp >= _focusedContinuationRspHi)
+		{
+			return;
+		}
+
+		if (Interlocked.Decrement(ref _focusedContinuationBudget) < 0)
 		{
 			return;
 		}
@@ -5961,7 +6008,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"[LOADER][TRACE] focused_continuation.{operation} " +
 			$"thread=0x{threadHandle:X16} rip=0x{continuation.Rip:X16} " +
 			$"rsp=0x{continuation.Rsp:X16} slot=0x{continuation.ReturnSlotAddress:X16} " +
-			$"rbp=0x{continuation.Rbp:X16} rbx=0x{continuation.Rbx:X16} " +
+			$"rbx=0x{continuation.Rbx:X16} rbp=0x{continuation.Rbp:X16} " +
+			$"rdi=0x{continuation.Rdi:X16} rsi=0x{continuation.Rsi:X16} " +
+			$"r12=0x{continuation.R12:X16} r13=0x{continuation.R13:X16} " +
+			$"r14=0x{continuation.R14:X16} r15=0x{continuation.R15:X16} " +
 			$"detail={detail}");
 	}
 
