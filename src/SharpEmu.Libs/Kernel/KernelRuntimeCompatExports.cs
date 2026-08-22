@@ -70,6 +70,14 @@ public static class KernelRuntimeCompatExports
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceGuestThreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
+    // Phase-B (guest-driven, on-demand) sceKernelLoadStartModule lifecycle trace. The DT_INIT
+    // runs inline on the calling guest thread and can block (e.g. sceKernelWaitEqueue) without
+    // ever returning, which leaves the module pinned StartState=Starting and prints no COMPLETE
+    // line. A missing COMPLETE for a given seq/module therefore names exactly which on-demand
+    // module_start never returned and on which guest thread it stalled.
+    private static readonly bool _traceLoadStart =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_LOADSTART"), "1", StringComparison.Ordinal);
+    private static long _loadStartSeq;
 
     [ThreadStatic]
     private static int _shortUsleepCount;
@@ -1322,10 +1330,32 @@ public static class KernelRuntimeCompatExports
             handle = KernelModuleRegistry.RegisterSyntheticModule("module.sprx", isSystemModule: false);
         }
 
+        var traceSeq = _traceLoadStart ? Interlocked.Increment(ref _loadStartSeq) : 0;
+        if (_traceLoadStart)
+        {
+            var priorState = KernelModuleRegistry.TryGetModuleByHandle(handle, out var priorModule)
+                ? priorModule.StartState.ToString()
+                : "unknown";
+            var initEntry = KernelModuleRegistry.TryGetModuleByHandle(handle, out var entryModule)
+                ? entryModule.InitEntryPoint
+                : 0UL;
+            Console.Error.WriteLine(
+                $"[LOADER][LOADSTART] enter seq={traceSeq} guest_thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+                $"path='{modulePath ?? "<null>"}' handle={handle} init=0x{initEntry:X16} prior_state={priorState}");
+        }
+
         if (KernelModuleRegistry.TryBeginModuleStart(handle, out var moduleToStart))
         {
             var scheduler = GuestThreadExecution.Scheduler;
             string? startError = null;
+            if (_traceLoadStart)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][LOADSTART] module_start.begin seq={traceSeq} module='{moduleToStart.Name}' " +
+                    $"init=0x{moduleToStart.InitEntryPoint:X16} guest_thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16}");
+            }
+
+            var startClock = _traceLoadStart ? Stopwatch.StartNew() : null;
             var started = scheduler is not null && scheduler.TryCallGuestFunction(
                 ctx,
                 moduleToStart.InitEntryPoint,
@@ -1336,6 +1366,14 @@ public static class KernelRuntimeCompatExports
                 $"sceKernelLoadStartModule:{moduleToStart.Name}",
                 out startError);
             KernelModuleRegistry.CompleteModuleStart(handle, started);
+            if (_traceLoadStart)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][LOADSTART] module_start.complete seq={traceSeq} module='{moduleToStart.Name}' " +
+                    $"started={started} elapsed_ms={startClock!.ElapsedMilliseconds} " +
+                    $"guest_thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16}");
+            }
+
             if (!started)
             {
                 Console.Error.WriteLine(
@@ -1354,6 +1392,18 @@ public static class KernelRuntimeCompatExports
             Console.Error.WriteLine(
                 $"[LOADER][INFO] sceKernelLoadStartModule started '{moduleToStart.Name}' " +
                 $"at 0x{moduleToStart.InitEntryPoint:X16}");
+        }
+        else if (_traceLoadStart)
+        {
+            // TryBeginModuleStart returned false: the module was already Started, already in
+            // flight on another caller (StartState=Starting), or has no runnable initializer.
+            // These callers return OK immediately without waiting for the in-flight start.
+            var state = KernelModuleRegistry.TryGetModuleByHandle(handle, out var skipped)
+                ? skipped.StartState.ToString()
+                : "unknown";
+            Console.Error.WriteLine(
+                $"[LOADER][LOADSTART] module_start.skip seq={traceSeq} handle={handle} state={state} " +
+                $"guest_thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16}");
         }
 
         ctx[CpuRegister.Rax] = unchecked((uint)handle);
