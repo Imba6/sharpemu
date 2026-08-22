@@ -62,6 +62,10 @@ TIMED_OUT_WAIT = re.compile(
 # stuck-fence signal (nid synthesised as the sema NID Zxa0VhQVTsk so NID_NAMES resolves it).
 SEMA_HOST_BLOCK = re.compile(
     r"sema\.wait-host-block handle=0x0*([0-9A-Fa-f]+) name='([^']*)'.*?ret=0x([0-9A-Fa-f]+)")
+# Baselib recycles a small pool of system semaphores (0x18/0x84/0x86 all Baselib_SystemSemaphore),
+# so a busy-but-progressing fence logs MANY host-blocks AND many host-wakes. A host-block flood is
+# only "stuck" when the wakes do not keep up, so track wakes per handle and net them out.
+SEMA_HOST_WAKE = re.compile(r"sema\.wait-host-wake handle=0x0*([0-9A-Fa-f]+) ")
 WINDOW_CLOSED = re.compile(r"Host shutdown requested: videoout-window-closed")
 CACHE_SAVED = re.compile(r"pipeline cache saved")
 
@@ -108,7 +112,8 @@ def parse(path):
         "summary": [],        # (lineno, result, reason)
         "first_frame": 0,     # count
         "suspend_point": 0,   # count -- gameplay progress proxy (weak; see timed_out below)
-        "timed_out": [],      # (lineno, import_index, nid, handle, caller)
+        "timed_out": [],      # (lineno, import_index, nid, handle, caller, source)  source in {warn,block}
+        "host_wakes": {},     # handle -> count of sema.wait-host-wake (services host-blocks)
         "window_closed": 0,   # user closed the VideoOut window (usually after a visible stall)
         "cache_saved": 0,     # pipeline-cache saves (sustained gameplay corroboration)
     }
@@ -154,14 +159,19 @@ def parse(path):
             if m:
                 events["timed_out"].append(
                     (lineno, m.group(1), m.group(2), norm_handle("0x" + m.group(3)),
-                     "0x" + m.group(4)))
+                     "0x" + m.group(4), "warn"))
                 continue
             m = SEMA_HOST_BLOCK.search(line)
             if m:
                 # import# unknown from this trace line; use lineno as an ordering proxy.
                 events["timed_out"].append(
                     (lineno, str(lineno), "Zxa0VhQVTsk", norm_handle("0x" + m.group(1)),
-                     "0x" + m.group(3)))
+                     "0x" + m.group(3), "block"))
+                continue
+            m = SEMA_HOST_WAKE.search(line)
+            if m:
+                h = norm_handle("0x" + m.group(1))
+                events["host_wakes"][h] = events["host_wakes"].get(h, 0) + 1
                 continue
             if WINDOW_CLOSED.search(line):
                 events["window_closed"] += 1
@@ -178,21 +188,32 @@ def parse(path):
 
 
 def find_stuck_fence(events, threshold=200):
-    """Return the dominant (nid, handle, caller) finite-wait that times out repeatedly and spans to
-    near the end of the log, or None. This is the Stage-11B 'stuck fence poll' signature."""
+    """Return the dominant (nid, handle, caller) finite-wait that is never serviced, or None.
+
+    Two sources: genuine timed-out WARNs (each is a real TIMED_OUT return -> counts directly), and
+    sema.wait-host-block traces (a host-park block that MAY later be woken). Baselib recycles a small
+    semaphore pool, so a busy fence logs many host-blocks AND many host-wakes; such a fence is NOT
+    stuck. So for a host-block-sourced group, subtract that handle's host-wakes before comparing to
+    the threshold. A genuinely stuck fence has blocks/timeouts the wakes never catch up with.
+    """
     from collections import Counter
     if not events["timed_out"]:
         return None
-    groups = Counter((nid, handle, caller) for _, _, nid, handle, caller in events["timed_out"])
-    (nid, handle, caller), count = groups.most_common(1)[0]
-    if count < threshold:
+    groups = Counter((nid, handle, caller) for _, _, nid, handle, caller, _ in events["timed_out"])
+    best = None
+    for (nid, handle, caller), raw in groups.most_common():
+        srcs = {s for _, _, n, h, c, s in events["timed_out"] if (n, h, c) == (nid, handle, caller)}
+        # Net host-block groups against the handle's wakes; WARN groups are already genuine timeouts.
+        net = raw - events["host_wakes"].get(handle, 0) if srcs == {"block"} else raw
+        if net >= threshold and (best is None or net > best[1]):
+            best = ((nid, handle, caller), net, raw)
+    if best is None:
         return None
-    lines = [ln for ln, _, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller)]
-    first_imp = next(imp for _, imp, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller))
-    last_imp = [imp for _, imp, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller)][-1]
-    return {"nid": nid, "handle": handle, "caller": caller, "count": count,
-            "first_line": lines[0], "last_line": lines[-1],
-            "first_import": first_imp, "last_import": last_imp}
+    (nid, handle, caller), net, raw = best
+    entries = [(ln, imp) for ln, imp, n, h, c, _ in events["timed_out"] if (n, h, c) == (nid, handle, caller)]
+    return {"nid": nid, "handle": handle, "caller": caller, "count": net,
+            "first_line": entries[0][0], "last_line": entries[-1][0],
+            "first_import": entries[0][1], "last_import": entries[-1][1]}
 
 
 def build_loadstart_table(events):
