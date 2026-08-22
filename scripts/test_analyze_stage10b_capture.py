@@ -82,8 +82,9 @@ class TerminalOutcomeTests(unittest.TestCase):
         self.assertEqual(events["suspend_point"], 2)  # far below the gameplay threshold
         # analyze_terminal must report NOT-ok (the run failed) despite modules completing.
         with contextlib.redirect_stdout(io.StringIO()):
-            ok = azr.analyze_terminal(events)
+            ok, reached = azr.analyze_terminal(events)
         self.assertFalse(ok)
+        self.assertFalse(reached)
         # And no module_start is stalled (hypothesis disproven, not a loader stall).
         table = azr.build_loadstart_table(events)
         stalled = [s for s in table if table[s].get("begin") and not table[s].get("complete")]
@@ -95,8 +96,41 @@ class TerminalOutcomeTests(unittest.TestCase):
         self.assertEqual(events["backend_failed"], [])
         self.assertGreaterEqual(events["suspend_point"], 10)
         with contextlib.redirect_stdout(io.StringIO()):
-            ok = azr.analyze_terminal(events)
+            ok, reached = azr.analyze_terminal(events)
         self.assertTrue(ok)
+        self.assertTrue(reached)
+
+    def test_guard_disabled_reaching_gameplay_is_ok(self):
+        # Stage-11 A/B SUCCESS shape: flags-off run (no LOADSTART/EQUEUE trace), guard disabled so no
+        # guard firing, modules complete via the unconditional 'started' INFO, gameplay reached.
+        text = (
+            "[LOADER][INFO] sceKernelLoadStartModule started 'PSNCore.prx' at 0x0000000809D28010\n"
+            "[LOADER][INFO] sceKernelLoadStartModule started 'SaveData.prx' at 0x0000000809FA1010\n"
+            "[LOADER][INFO] Vulkan VideoOut presented first frame: 3840x2160\n"
+            + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 40
+        )
+        events, _ = _parse_text(text)
+        self.assertEqual(events["guard_fired"], [])
+        self.assertEqual(len(events["started_info"]), 2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, reached = azr.analyze_terminal(events)
+        self.assertTrue(ok)
+        self.assertTrue(reached)
+
+    def test_guard_disabled_still_stalled_is_failure_case(self):
+        # Stage-11 A/B FAILURE shape: guard disabled, no guard firing, modules complete, but the run
+        # never reaches sustained gameplay -> the guard was only shortening a pre-existing stall.
+        text = (
+            "[LOADER][INFO] sceKernelLoadStartModule started 'PSNCore.prx' at 0x0000000809D28010\n"
+            "[LOADER][INFO] Vulkan VideoOut presented first frame: 3840x2160\n"
+            "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n"
+        )
+        events, _ = _parse_text(text)
+        self.assertEqual(events["guard_fired"], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, reached = azr.analyze_terminal(events)
+        self.assertFalse(ok)       # not a success
+        self.assertFalse(reached)  # did not reach gameplay -> FAILURE-case branch
 
     def test_module_stall_is_detected(self):
         events, _ = _parse_text(MODULE_STALL)

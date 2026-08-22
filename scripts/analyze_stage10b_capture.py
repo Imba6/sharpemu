@@ -185,16 +185,20 @@ def analyze_terminal(events):
         print(f"  Summary @L{ln}: result={result} reason={reason}")
 
     ok = (not events["guard_fired"] and not events["backend_failed"] and reached_gameplay)
-    return ok
+    return ok, reached_gameplay
 
 
 def analyze_single(path, events):
     print(f"\n=== Stage 10B analysis: {path} ===")
-    analyze_terminal(events)
+    _ok, reached_gameplay = analyze_terminal(events)
     table = build_loadstart_table(events)
 
     if not table and not events["started_info"]:
-        print("  [!] No [LOADSTART] lines found. Was SHARPEMU_LOG_LOADSTART=1 set?")
+        # Expected when the run was captured with SHARPEMU_LOG_LOADSTART off (e.g. the Stage-11
+        # guard-disabled A/B run). Module completion is still visible via the always-printed
+        # "sceKernelLoadStartModule started 'X'" INFO lines.
+        print("  [i] No [LOADSTART] trace lines (SHARPEMU_LOG_LOADSTART off?); "
+              "using the unconditional 'started' INFO lines + terminal outcome instead.")
     # Path-B lifecycle summary
     print("\n-- Path-B LoadStartModule lifecycle --")
     stalled = []
@@ -222,16 +226,23 @@ def analyze_single(path, events):
     if not stalled:
         n_started = len(events["started_info"])
         guard = bool(events["guard_fired"] or events["backend_failed"])
+        n_modules = n_started if n_started else len({s for s in table if table[s].get("complete")})
         if guard:
-            print(f"\n  [OK-module] No stalled module_start (every begin has a complete; "
-                  f"{n_started} 'started' INFO line(s)) -> the Stage-10B module_start/equeue "
-                  f"hypothesis is DISPROVEN for this capture.")
-            print(f"  [FAIL-run] But the run did NOT succeed: see the terminal outcome above "
-                  f"(import-loop guard / backend failure). The blocker is elsewhere (preload spin), "
-                  f"not module loading.")
+            print(f"\n  [OK-module] No stalled module_start ({n_modules} module(s) started) -> the "
+                  f"Stage-10B module_start/equeue hypothesis is DISPROVEN for this capture.")
+            print(f"  [FAIL-run] The run did NOT succeed: see the terminal outcome above "
+                  f"(import-loop guard / backend failure). Blocker is the preload spin, not module load.")
+        elif reached_gameplay:
+            print(f"\n  [OK] No stalled module_start ({n_modules} module(s) started) and the run "
+                  f"REACHED SUSTAINED GAMEPLAY. GOOD run.")
+            print(f"  [STAGE-11 SUCCESS] If this is the guard-disabled A/B run, the import-loop-guard "
+                  f"false-positive is causally proven (same config + guard off -> gameplay).")
         else:
-            print(f"\n  [OK] No stalled module_start (every begin has a complete). "
-                  f"{n_started} 'started' INFO line(s). This looks like a GOOD run.")
+            print(f"\n  [WARN] No stalled module_start ({n_modules} module(s) started) and no guard "
+                  f"firing, but the run did NOT reach sustained gameplay.")
+            print(f"  [STAGE-11 FAILURE-CASE] If this is the guard-disabled A/B run, disabling the "
+                  f"guard did NOT unblock it -> the guard was only shortening a pre-existing preload "
+                  f"stall; the next blocker is preload throughput/correctness, not the guard.")
         return stalled
 
     # Correlate each stalled thread to its equeue wait + producers.
