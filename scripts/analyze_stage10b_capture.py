@@ -42,6 +42,27 @@ STALL_STUB = re.compile(r"\[LOADER\]\[ERROR\] Stall import-stub: (.*)$")
 NOPROG = re.compile(r"\[LOADER\]\[WARN\] No import progress for .*")
 LOADSTART_STARTED = re.compile(r"\[LOADER\]\[INFO\] sceKernelLoadStartModule started '([^']+)'")
 
+# Terminal-outcome grammar (added Stage-10B after the first real capture disproved the
+# module_start/equeue hypothesis: the run instead reached preload and was force-unwound by the
+# import-loop guard, then misreported as a backend failure).
+GUARD_FIRED = re.compile(r"\[LOADER\]\[ERROR\] Import-loop guard fired at import#(\d+): nid=(\S+) ret=0x([0-9A-Fa-f]+)")
+REPEAT_LOOP = re.compile(r"\[LOADER\]\[ERROR\] Detected repeating import loop and forced guest unwind to host\.")
+BACKEND_FAILED = re.compile(r"\[DISPATCHER\] Native backend FAILED: (.*)$")
+SUMMARY = re.compile(r"Summary: result=(\S+) reason=(\S+)")
+FIRST_FRAME = re.compile(r"presented first frame")
+SUSPEND_POINT = re.compile(r"suspendPoint")
+
+# Common spin/wait NIDs so the terminal report is human-readable without an aerolib round-trip.
+NID_NAMES = {
+    "T72hz6ffq08": "scePthreadYield",
+    "9UK1vLZQft4": "pthread_mutex_lock",
+    "JTvBflhYazQ": "sceKernelWaitEventFlag",
+    "Zxa0VhQVTsk": "sceKernelWaitSema",
+    "Op8TBGY5KHg": "pthread_cond_wait",
+    "fzyMKs9kim0": "sceKernelWaitEqueue",
+    "wzvqT4UqKX8": "sceKernelLoadStartModule",
+}
+
 
 def kv(text):
     out = {}
@@ -68,6 +89,12 @@ def parse(path):
         "stall_threads": [],  # (lineno, fields)
         "stall_stub": [],     # (lineno, text)
         "started_info": [],   # (lineno, module) -- the completion INFO the emulator always prints
+        "guard_fired": [],    # (lineno, import_index, nid, ret)
+        "repeat_loop": [],    # (lineno,)
+        "backend_failed": [], # (lineno, detail)
+        "summary": [],        # (lineno, result, reason)
+        "first_frame": 0,     # count
+        "suspend_point": 0,   # count -- gameplay progress proxy
     }
     with open(path, "r", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
@@ -91,6 +118,27 @@ def parse(path):
             m = LOADSTART_STARTED.search(line)
             if m:
                 events["started_info"].append((lineno, m.group(1)))
+                continue
+            m = GUARD_FIRED.search(line)
+            if m:
+                events["guard_fired"].append((lineno, m.group(1), m.group(2), m.group(3)))
+                continue
+            if REPEAT_LOOP.search(line):
+                events["repeat_loop"].append((lineno,))
+                continue
+            m = BACKEND_FAILED.search(line)
+            if m:
+                events["backend_failed"].append((lineno, m.group(1)))
+                continue
+            m = SUMMARY.search(line)
+            if m:
+                events["summary"].append((lineno, m.group(1), m.group(2)))
+                continue
+            if FIRST_FRAME.search(line):
+                events["first_frame"] += 1
+                continue
+            if SUSPEND_POINT.search(line):
+                events["suspend_point"] += 1
     return events
 
 
@@ -109,8 +157,40 @@ def build_loadstart_table(events):
     return table
 
 
+def analyze_terminal(events):
+    """Report how the run ended and whether it reached gameplay.
+
+    A run can have every module_start complete yet still fail later (preload stall force-unwound
+    by the import-loop guard, then misreported as a backend failure). This section makes that
+    outcome visible instead of the module-only view calling it 'GOOD'.
+    """
+    print("\n-- Terminal outcome / progress --")
+    ff = events["first_frame"]
+    sp = events["suspend_point"]
+    reached_gameplay = sp >= 10  # good runs show tens of Agc suspendPoints; a preload stall shows ~2
+    print(f"  first_frame_presented={ff}  suspendPoint(gameplay proxy)={sp}  "
+          f"-> {'reached gameplay' if reached_gameplay else 'did NOT reach sustained gameplay'}")
+
+    for ln, imp, nid, ret in events["guard_fired"]:
+        name = NID_NAMES.get(nid, "?")
+        print(f"  [!] IMPORT-LOOP GUARD FIRED @L{ln}: import#{imp} nid={nid} ({name}) ret=0x{ret} "
+              f"-> a guest thread spin-looped this import >5s and was force-unwound to host.")
+    for ln, in events["repeat_loop"]:
+        print(f"  [!] Forced guest unwind (repeating import loop) @L{ln}.")
+    for ln, detail in events["backend_failed"]:
+        print(f"  [!] Native backend FAILED @L{ln}: {detail}  "
+              f"(NOTE: 'unknown backend error' + NOT_IMPLEMENTED is a fallback bucket, not a real "
+              f"crash/unimplemented feature -- see the guard firing above for the true cause.)")
+    for ln, result, reason in events["summary"]:
+        print(f"  Summary @L{ln}: result={result} reason={reason}")
+
+    ok = (not events["guard_fired"] and not events["backend_failed"] and reached_gameplay)
+    return ok
+
+
 def analyze_single(path, events):
     print(f"\n=== Stage 10B analysis: {path} ===")
+    analyze_terminal(events)
     table = build_loadstart_table(events)
 
     if not table and not events["started_info"]:
@@ -141,8 +221,17 @@ def analyze_single(path, events):
 
     if not stalled:
         n_started = len(events["started_info"])
-        print(f"\n  [OK] No stalled module_start (every begin has a complete). "
-              f"{n_started} 'started' INFO line(s). This looks like a GOOD run.")
+        guard = bool(events["guard_fired"] or events["backend_failed"])
+        if guard:
+            print(f"\n  [OK-module] No stalled module_start (every begin has a complete; "
+                  f"{n_started} 'started' INFO line(s)) -> the Stage-10B module_start/equeue "
+                  f"hypothesis is DISPROVEN for this capture.")
+            print(f"  [FAIL-run] But the run did NOT succeed: see the terminal outcome above "
+                  f"(import-loop guard / backend failure). The blocker is elsewhere (preload spin), "
+                  f"not module loading.")
+        else:
+            print(f"\n  [OK] No stalled module_start (every begin has a complete). "
+                  f"{n_started} 'started' INFO line(s). This looks like a GOOD run.")
         return stalled
 
     # Correlate each stalled thread to its equeue wait + producers.
