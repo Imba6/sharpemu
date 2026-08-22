@@ -61,11 +61,12 @@ Invalid Program: attempted to call a UnmanagedCallersOnly method from managed co
 In the same run the **parked** delivery path succeeded **711/711** (`delivery_exit …
 success=True`, `elapsed_ms` ~28–31 s each = they wait out the GC suspend). Only **12**
 safe-point deliveries occurred, and one coincided with the crash. So:
-- **Parked / Route C delivery is safe.** `TryRaiseGuestException`'s parked-cooperative
-  branch (`DirectExecutionBackend.cs:5088-5276`) runs `DeliverException` on the thread's own
-  `GuestExecutionRunner` from a **clean managed base with no active outer import** — the
-  calli-to-guest transition puts the thread in preemptive before the handler's inner
-  reverse-P/Invoke, so the UCO assertion holds.
+- **Parked / Route C delivery is safe *in this single run*.** `TryRaiseGuestException`'s
+  parked-cooperative branch (`DirectExecutionBackend.cs:5088-5276`) runs `DeliverException`
+  on the thread's own `GuestExecutionRunner` from a **clean managed base with no active outer
+  import** — no *outer* import sandwich. (⚠️ It is still guest-above-managed on a CLR-managed
+  runner; the fix attempt below proves it *also* crashes under the concurrent worker storm —
+  it just survives far more often than the safe-point path. See §"Fix attempt".)
 - **Running-worker safe-point delivery is the crash** — inline, above a live import frame,
   thread already cooperative.
 
@@ -105,3 +106,60 @@ inline shape faults while top-level cooperative execution does not; the machiner
 confirmed the block path already implements every primitive the fix reuses (yield-out,
 continuation capture, same-worker top-level re-entry); the repro captured the decisive
 `'kernel exception 0x1E safe point'` frame at the crash. None edited the tree.
+
+## Fix attempt — yield/ExceptionPending reroute (implemented, regressed, REVERTED)
+
+Implemented the fix principle behind `SHARPEMU_NATIVE_GUEST_V2=1`: a new
+`GuestNativeCallExitReason.ExceptionPending`; at a running-worker import safe point with a
+queued 0x1E for that thread, `HandlePendingGuestExceptionAtSafePoint` captures the
+interrupted continuation, stashes any concurrently-requested block, and yields out of the
+import (reusing `TryYieldGuestThreadToHostStub`); `RunGuestThread` then delivers the handler
+from its own `GuestExecutionRunner` and resumes. Diff preserved as
+`docs/native-guest-execution-v2-stage6-worker-0x1e-reroute-ATTEMPT.patch` (reverted from the
+tree). Tested with the dedicated-primary patch applied.
+
+**Result — it did NOT fix the crash, and regressed:**
+- The reroute worked mechanically: `guest_exception.safe_point_enter` (inline delivery) went
+  to **0** — no more inline delivery above a live import frame.
+- **But the UCO crash persisted** (still ~2/5 runs), now on a `mode=parked` /
+  `'kernel exception 0x1E'` thread, and **0/5 runs reached gameplay** (vs 3/9 without the
+  patch; the non-crash runs hit the pre-existing libunwind spin, blocker #2).
+
+**Why (the deeper finding):** the **parked delivery path (Route C) is *also*
+guest-above-managed.** `TryRaiseGuestException`'s parked branch runs `DeliverException` on
+the thread's `GuestExecutionRunner` — a **CLR-managed `new Thread(...)`** — via
+`TryCallGuestFunction → ExecuteGuestThreadEntry(reentrant:true) → inline CallNativeEntry`, so
+the guest 0x1E handler runs above the runner's managed frames, and the handler's own
+reverse-P/Invoke imports are the same UCO trip-wire. This shape **survives when only one
+thread delivers at a time** (the Stage-5 primary: 0/14 UCO — a single brief cooperative
+window per GC has low hijack probability) but **not under Cocoon's ~20-worker concurrent 0x1E
+storm** (≈20× the probability that a background GC hijacks one runner mid-import). Moving the
+running-worker delivery onto that *same* managed runner therefore cannot fix it.
+
+**The real requirement:** the handler must run on the guest thread's **own native base**
+(preemptive, no managed frames below the guest handler), exactly as the Stage-5 primary's
+**pinned `NativeGuestExecutor`** achieves. Two ways, both larger and both carrying
+GC-correctness risk — hence STOP per the milestone stop-conditions rather than force one:
+1. **Pin a persistent native worker per cooperative guest thread** (extend the Stage-5C
+   primary model to every Unity `Job.Worker`). Correct and GC-safe, but costs one OS thread
+   per guest thread — it abandons the pooled-worker scalability Stage 2/3 introduced.
+2. **Deliver the handler on a rented pool worker** (top-level, GC-safe) with the thread's
+   guest context. Cheap, but conflicts with the deliberate invariant documented at
+   `DirectExecutionBackend.cs` (`DeliverException`, the `GuestExecutionRunner` comment): the
+   handler must run on the thread's **registered** native execution context or IL2CPP's
+   stop-the-world collector "publishes roots from the wrong native execution context, which
+   lets live IL2CPP delegates be reclaimed." Whether a rented worker with a correctly
+   transferred guest context (FsBase/guest-stack/`scePthreadSelf` handle) satisfies that
+   invariant is **unproven** — doing it wrong is silent GC heap corruption, not a clean
+   crash. This is the milestone's "worker exception semantics remain unclear" stop.
+
+## Status / recommendation
+
+- **Root cause: proven** (running-worker inline safe-point delivery) — and, newly, the parked
+  Route-C delivery is the *same* unsafe shape, only concurrency-sensitive.
+- **Fix: not landed.** The yield reroute is correct in isolation but insufficient (the parked
+  path remains) and regressed; reverted. The default tree is unchanged and builds clean.
+- **Decision needed (human):** option 1 (pin a native worker per guest thread — safe,
+  costs threads) vs option 2 (rented-worker delivery — needs the IL2CPP identity invariant
+  proven first). This is an AGC/GC-ownership architectural call beyond a minimal fix.
+- **Nothing was pushed.**

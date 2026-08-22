@@ -1,0 +1,348 @@
+diff --git a/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.Imports.cs b/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.Imports.cs
+index 622aef2..8b88cc9 100644
+--- a/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.Imports.cs
++++ b/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.Imports.cs
+@@ -604,13 +604,11 @@ public sealed partial class DirectExecutionBackend
+ 			{
+ 				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
+ 			}
++			StoreImportVectorReturn(cpuContext, argPackPtr);
+ 			if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
+ 			{
+-				DeliverPendingGuestExceptionAtSafePoint(
+-					cpuContext,
+-					CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
++				HandlePendingGuestExceptionAtSafePoint(cpuContext, argPackPtr, num, num7, importStubEntry.Nid);
+ 			}
+-			StoreImportVectorReturn(cpuContext, argPackPtr);
+ 			if (dispatchResolved &&
+ 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
+ 				string.Equals(importStubEntry.Nid, "BohYr-F7-is", StringComparison.Ordinal))
+@@ -1438,13 +1436,11 @@ public sealed partial class DirectExecutionBackend
+ 				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
+ 			}
+ 		}
++		StoreImportVectorReturn(cpuContext, argPackPtr);
+ 		if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
+ 		{
+-			DeliverPendingGuestExceptionAtSafePoint(
+-				cpuContext,
+-				CaptureImportBoundaryContinuation(cpuContext, argPackPtr, returnRip));
++			HandlePendingGuestExceptionAtSafePoint(cpuContext, argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid);
+ 		}
+-		StoreImportVectorReturn(cpuContext, argPackPtr);
+ 
+ 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+ 		{
+@@ -1815,6 +1811,66 @@ public sealed partial class DirectExecutionBackend
+ 		return true;
+ 	}
+ 
++	// V2 stage 6: at a running-worker import safe point carrying a queued 0x1E for THIS
++	// thread, yield out of the import (reusing the cooperative-block unwind) so the handler
++	// is delivered from the clean GuestExecutionRunner base in RunGuestThread -- never
++	// inline above this live import reverse-P/Invoke frame, which __fastfails under GC. Any
++	// real block the export requested at this same boundary is consumed and STASHED (so the
++	// handler's own nested block does not clobber it) and re-applied after delivery. Falls
++	// back to inline delivery when the slice cannot cleanly unwind (nested callback / no
++	// host sentinel, e.g. an inline primary without the dedicated worker).
++	private unsafe void HandlePendingGuestExceptionAtSafePoint(
++		CpuContext cpuContext, nint argPackPtr, long dispatchIndex, ulong returnRip, string nid)
++	{
++		var handle = GuestThreadExecution.CurrentGuestThreadHandle;
++		if (handle == 0 || !HasQueuedGuestExceptionForThread(handle))
++		{
++			// The queued exception is for another thread; it delivers at its own boundary.
++			return;
++		}
++
++		var interrupted = CaptureImportBoundaryContinuation(cpuContext, argPackPtr, returnRip);
++
++		// A nested guest callback cannot cleanly unwind to a worker loop; keep the legacy
++		// inline delivery there (rare; the outer frames are already a nested-callback shape).
++		if (_nestedGuestCallbackDepth != 0)
++		{
++			DeliverPendingGuestExceptionAtSafePoint(cpuContext, interrupted);
++			return;
++		}
++
++		// Consume any real block the export requested at this boundary so delivery runs
++		// BEFORE it (matching the legacy order and avoiding a clobber); re-applied later.
++		var hasStash = GuestThreadExecution.TryConsumeCurrentThreadBlock(
++			out var blockReason,
++			out var blockContinuation,
++			out var hasBlockContinuation,
++			out var blockWakeKey,
++			out var blockWaiter,
++			out var blockDeadline);
++
++		if (StorePendingExceptionContinuation(handle, interrupted) &&
++			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, nid, GuestExceptionDeliveryYieldReason))
++		{
++			if (hasStash)
++			{
++				StoreStashedBlock(handle, blockReason, blockContinuation, hasBlockContinuation, blockWakeKey, blockWaiter, blockDeadline);
++			}
++
++			return;
++		}
++
++		// Could not park (inline main / no sentinel): restore any consumed block and deliver
++		// inline (legacy behavior).
++		ClearPendingExceptionContinuation(handle);
++		if (hasStash && hasBlockContinuation)
++		{
++			RegisterBlockedGuestThreadContinuation(handle, blockContinuation, blockWakeKey, blockWaiter, blockDeadline);
++		}
++
++		DeliverPendingGuestExceptionAtSafePoint(cpuContext, interrupted);
++	}
++
+ 	private unsafe bool TryYieldGuestThreadToHostStub(nint argPackPtr, long dispatchIndex, ulong returnRip, string nid, string reason)
+ 	{
+ 		ulong hostExit = ActiveEntryReturnSentinelRip;
+diff --git a/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.cs b/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.cs
+index 33c5fa0..5471605 100644
+--- a/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.cs
++++ b/src/SharpEmu.Core/Cpu/Native/DirectExecutionBackend.cs
+@@ -438,6 +438,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 		Blocked,
+ 		ForcedExit,
+ 		Exception,
++
++		// A queued guest exception (Boehm 0x1E) was detected at an import safe point on
++		// a running native-worker slice. The worker yielded out of the import (like a
++		// block) so the handler is delivered from the clean GuestExecutionRunner base in
++		// RunGuestThread, never inline above the live import reverse-P/Invoke frame
++		// (which __fastfails under GC -- V2 stage 6).
++		ExceptionPending,
+ 	}
+ 
+ 	private sealed class GuestThreadState
+@@ -470,6 +477,31 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 
+ 		public string? BlockReason { get; set; }
+ 
++		// V2 stage 6: when a running worker yields out at a safe point to deliver a
++		// queued 0x1E, this holds the interrupted guest continuation to resume AFTER
++		// the handler runs (on the clean runner base). Distinct from BlockedContinuation
++		// so a concurrent real block is not clobbered.
++		public GuestCpuContinuation PendingExceptionContinuation { get; set; }
++
++		public bool HasPendingExceptionContinuation { get; set; }
++
++		// V2 stage 6: a real block requested by the export at the same import boundary as
++		// a queued 0x1E is stashed here (consumed BEFORE delivery so the handler's own
++		// nested block does not clobber it), then re-applied after the handler returns.
++		public bool StashedBlockActive { get; set; }
++
++		public string? StashedBlockReason { get; set; }
++
++		public GuestCpuContinuation StashedBlockContinuation { get; set; }
++
++		public bool StashedBlockHasContinuation { get; set; }
++
++		public string? StashedBlockWakeKey { get; set; }
++
++		public IGuestThreadBlockWaiter? StashedBlockWaiter { get; set; }
++
++		public long StashedBlockDeadlineTimestamp { get; set; }
++
+ 		public bool HasBlockedContinuation { get; set; }
+ 
+ 		public GuestCpuContinuation BlockedContinuation { get; set; }
+@@ -5520,6 +5552,132 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 		return true;
+ 	}
+ 
++	// V2 stage 6: yield reason marking a running-worker import safe point that parked to
++	// deliver a queued 0x1E from the clean runner base instead of inline above the import.
++	private const string GuestExceptionDeliveryYieldReason = "__guest_exception_delivery__";
++
++	private bool HasQueuedGuestExceptionForThread(ulong threadHandle)
++	{
++		if (threadHandle == 0 || Volatile.Read(ref _pendingGuestExceptionCount) == 0)
++		{
++			return false;
++		}
++
++		lock (_guestThreadGate)
++		{
++			return _pendingGuestExceptions.ContainsKey(threadHandle);
++		}
++	}
++
++	private bool StorePendingExceptionContinuation(ulong threadHandle, GuestCpuContinuation continuation)
++	{
++		if (threadHandle == 0 || continuation.Rip < 65536 || continuation.Rsp == 0)
++		{
++			return false;
++		}
++
++		lock (_guestThreadGate)
++		{
++			if (!_guestThreads.TryGetValue(threadHandle, out var thread))
++			{
++				return false;
++			}
++
++			thread.PendingExceptionContinuation = continuation;
++			thread.HasPendingExceptionContinuation = true;
++			return true;
++		}
++	}
++
++	private bool TryTakePendingExceptionContinuation(ulong threadHandle, out GuestCpuContinuation continuation)
++	{
++		continuation = default;
++		lock (_guestThreadGate)
++		{
++			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
++				!thread.HasPendingExceptionContinuation)
++			{
++				return false;
++			}
++
++			continuation = thread.PendingExceptionContinuation;
++			thread.PendingExceptionContinuation = default;
++			thread.HasPendingExceptionContinuation = false;
++			return true;
++		}
++	}
++
++	private void ClearPendingExceptionContinuation(ulong threadHandle)
++	{
++		lock (_guestThreadGate)
++		{
++			if (_guestThreads.TryGetValue(threadHandle, out var thread))
++			{
++				thread.PendingExceptionContinuation = default;
++				thread.HasPendingExceptionContinuation = false;
++			}
++		}
++	}
++
++	private void StoreStashedBlock(
++		ulong threadHandle,
++		string? reason,
++		GuestCpuContinuation continuation,
++		bool hasContinuation,
++		string wakeKey,
++		IGuestThreadBlockWaiter? waiter,
++		long deadlineTimestamp)
++	{
++		lock (_guestThreadGate)
++		{
++			if (!_guestThreads.TryGetValue(threadHandle, out var thread))
++			{
++				return;
++			}
++
++			thread.StashedBlockActive = true;
++			thread.StashedBlockReason = reason;
++			thread.StashedBlockContinuation = continuation;
++			thread.StashedBlockHasContinuation = hasContinuation;
++			thread.StashedBlockWakeKey = wakeKey;
++			thread.StashedBlockWaiter = waiter;
++			thread.StashedBlockDeadlineTimestamp = deadlineTimestamp;
++		}
++	}
++
++	// Re-applies a block stashed at a safe point (consumed before 0x1E delivery) as the
++	// thread's real block, so RunGuestThread's Blocked handling re-checks its waiter. Must
++	// run before the thread's State is finalized. Returns true if a block was re-applied.
++	private bool TryReapplyStashedBlock(GuestThreadState thread)
++	{
++		lock (_guestThreadGate)
++		{
++			if (!thread.StashedBlockActive)
++			{
++				return false;
++			}
++
++			thread.StashedBlockActive = false;
++			if (thread.StashedBlockHasContinuation)
++			{
++				thread.BlockedContinuation = thread.StashedBlockContinuation;
++				thread.HasBlockedContinuation = true;
++				thread.BlockWakeKey = thread.StashedBlockWakeKey;
++				thread.BlockWaiter = thread.StashedBlockWaiter;
++				thread.BlockDeadlineTimestamp = thread.StashedBlockDeadlineTimestamp;
++			}
++
++			thread.BlockReason = thread.StashedBlockReason;
++			thread.StashedBlockReason = null;
++			thread.StashedBlockContinuation = default;
++			thread.StashedBlockHasContinuation = false;
++			thread.StashedBlockWakeKey = null;
++			thread.StashedBlockWaiter = null;
++			thread.StashedBlockDeadlineTimestamp = 0;
++			return true;
++		}
++	}
++
+ 	private static bool TryWriteGuestExceptionContext(
+ 		CpuContext context,
+ 		ulong address,
+@@ -6039,9 +6197,38 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 						? $"[LOADER][INFO] Pumping guest thread '{thread.Name}' reason={reason} resume=0x{continuation.Rip:X16}"
+ 						: $"[LOADER][INFO] Pumping guest thread '{thread.Name}' reason={reason} entry=0x{thread.EntryPoint:X16}");
+ 			}
++			string? blockReason = null;
+ 			var exitReason = resumeContinuation
+-				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
++				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out blockReason)
+ 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
++
++			// V2 stage 6: a running worker that hit a queued 0x1E yielded out of its import
++			// (ExceptionPending) so the handler is delivered HERE on the clean
++			// GuestExecutionRunner base -- no active outer import reverse-P/Invoke, so no
++			// guest-above-managed __fastfail -- instead of inline on the worker. Deliver the
++			// handler, then either honor a block the export requested at that same boundary
++			// (stashed before delivery) or resume the interrupted guest execution.
++			while (exitReason == GuestNativeCallExitReason.ExceptionPending && !ActiveForcedGuestExit)
++			{
++				if (!TryTakePendingExceptionContinuation(thread.ThreadHandle, out var interrupted))
++				{
++					exitReason = GuestNativeCallExitReason.Blocked;
++					break;
++				}
++
++				DeliverPendingGuestExceptionAtSafePoint(thread.Context, interrupted);
++
++				if (TryReapplyStashedBlock(thread))
++				{
++					blockReason = thread.BlockReason;
++					exitReason = GuestNativeCallExitReason.Blocked;
++					break;
++				}
++
++				exitReason = ExecuteBlockedGuestThreadContinuation(
++					thread.Context, interrupted, thread.Name, out blockReason);
++			}
++
+ 			using (LockGate("RunGuestThread.exit"))
+ 			{
+ 				switch (exitReason)
+@@ -6427,7 +6614,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 				if (ActiveGuestThreadYieldRequested)
+ 				{
+ 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
+-					return GuestNativeCallExitReason.Blocked;
++					return string.Equals(reason, GuestExceptionDeliveryYieldReason, StringComparison.Ordinal)
++						? GuestNativeCallExitReason.ExceptionPending
++						: GuestNativeCallExitReason.Blocked;
+ 				}
+ 				if (ActiveForcedGuestExit)
+ 				{
+@@ -6591,7 +6780,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
+ 				if (ActiveGuestThreadYieldRequested)
+ 				{
+ 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
+-					return GuestNativeCallExitReason.Blocked;
++					return string.Equals(reason, GuestExceptionDeliveryYieldReason, StringComparison.Ordinal)
++						? GuestNativeCallExitReason.ExceptionPending
++						: GuestNativeCallExitReason.Blocked;
+ 				}
+ 				if (ActiveForcedGuestExit)
+ 				{
