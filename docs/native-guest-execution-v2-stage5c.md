@@ -1,6 +1,8 @@
 # Native Guest Execution V2 — Stage 5C: primary cooperative wake-churn investigation
 
-Status: investigation complete (branch `gpt-dlsym`, not pushed). Follows Stage 5A
+Status: investigation complete + **dedicated-worker implemented, validated, and reverted**
+(branch `gpt-dlsym`, not pushed). See §10–§11 for the implementation/validation result and
+the recovery patch. Follows Stage 5A
 (docs `df6a655`): the cooperative primary **eliminates the UCO `__fastfail`** (host-park
 nested 0x1E delivery gone) but **stalls Cocoon at ~0 fps**, churning block→wake→resume→
 reblock at guest RIP `0x800D2622A`. This document decides the Phase-6 question the Stage
@@ -189,3 +191,76 @@ interaction audit; ready-queue duplicate-enqueue + ordinary-pthread comparison; 
 `0x800D2622A` identification) plus direct reading of the scheduler and the captured
 `run_fix.log`. None edited the tree. Findings were integrated here; the log evidence
 (1:1 signal:wake) is the decisive proof.
+
+## 10. Dedicated-worker implementation + validation (Windows-native, 14 Cocoon runs)
+
+The design in §7 was implemented behind `SHARPEMU_NATIVE_GUEST_V2_PRIMARY=1` (requires
+`SHARPEMU_NATIVE_GUEST_V2=1`) and validated on Windows. The full diff is preserved as
+`docs/native-guest-execution-v2-stage5c-dedicated-primary-worker.patch` (apply with
+`git apply`); it was **reverted from the tree** per the milestone stop-rule (see §11).
+
+**What it did:** the true process entry (gated to `frameKind==ProcessEntry` via a
+dispatcher-set flag — the debug frame is null without a debugger, so `_activeDebugFrame`
+could not be used) runs as a cooperative `GuestThreadState` registered in `_guestThreads`,
+pinned to its own persistent `NativeGuestExecutor` created outside the pool run-slot budget.
+`RunGuestEntryStub` uses the pinned executor directly (no `pool.Rent/Return`). `ExecuteEntry`
+parks the CLR main thread on an exit poll while the ready-dispatcher drives the primary; the
+import-loop guard was re-enabled for the primary via an `IsCooperativePrimary` marker.
+
+**Result across 14 gated runs (80–95 s each, `presented_fps` sampled):**
+
+| Outcome | Runs | Share |
+|---|---|---|
+| Clean sustained ~25–32 fps, zero UCO | d, e, i | 3/14 (21%) |
+| Reached ~30 fps then worker-0x1E UCO crash | h, l | 2/14 |
+| Early/mid worker-0x1E UCO crash | C, f, k, m, n | 5/14 |
+| Primary libunwind spin, 0 fps, no crash | B, g, j, p | 4/14 |
+| **Primary host-park UCO crash (the TARGET)** | **none** | **0/14** |
+
+**Confirmed positives:**
+- **The target crash is eliminated.** `kernel exception 0x1E host park` = 0 and primary
+  `UnmanagedCallersOnly __fastfail` = 0 in *every* run. The host-park nested delivery that
+  Stages 4–5C targeted is gone.
+- **~30 fps gameplay is reachable.** Runs d/e/i sustain ~25–32 fps for the whole session
+  (draw_ms ~40–170 ms) — versus Stage 5A's ~0 fps / draw_ms ~4865 ms. So the dedicated
+  pinned worker *did* remove enough per-block overhead to reach gameplay, validating the §7
+  design direction. (Refinement of the §4 CASE-B note: pool rent was one cost among several;
+  removing it was necessary but the cooperative scheduler round-trip still costs more than
+  host-park's in-place `Monitor.Wait`, so the win is real but not free.)
+
+**Two remaining non-deterministic blockers (why it is not production-ready):**
+1. **Pre-existing worker-thread 0x1E-storm UCO crash (~50%).** The fatal flight recorder
+   shows many `Job.Worker` threads (mtid 45–93) in a `kernel exception 0x1E` storm with
+   `sceKernelSignalSema`/`sceKernelWaitEventFlag`/`G+/G- kernel exception 0x1E` rings — the
+   Boehm stop-the-world suspending Unity job workers, the UCO firing on one. This is the
+   *separate* pre-existing "worker-thread UnmanagedCallersOnly continuation crash" (memory
+   `cocoon-gameplay-uco-crash`), not the primary; run h/l show it can hit mid-gameplay after
+   30 fps. Making the primary cooperative removed the earlier primary crash and thereby
+   *exposed* this one as the dominant blocker.
+2. **Primary libunwind spin (~29%), a new stall class.** The stuck runs are not deadlocked —
+   they reach ~3–9 million imports spinning in `sceSysmoduleGetModuleInfoForUnwind`
+   (NID `4fU5yvOkVG4`) returning `NOT_FOUND`, i.e. the guest C++ unwinder looping on an
+   address with no module info. The default (inline) path does not exhibit this. The
+   re-enabled import-loop guard did **not** catch it (the spin interleaves other imports, so
+   `HasRepeatingImportLoopPattern` does not match a single-NID loop).
+
+## 11. Decision — reverted (patch preserved), CASE B design/docs kept
+
+Success target was ~30 fps **and** zero UCO. It is met in 3/14 runs; ~50% still hit the
+pre-existing worker crash and ~29% hit the new unwind-spin stall. Per the milestone stop-rule
+("if the dedicated worker causes a new stall/crash class, revert only that implementation and
+keep the proven CASE B design/docs"), the implementation was reverted from the tree. Nothing
+is lost: the full diff is `native-guest-execution-v2-stage5c-dedicated-primary-worker.patch`,
+and the empirical wins (target crash eliminated 0/14; ~30 fps proven) are recorded here.
+
+**Recommended next steps, in order:**
+1. Fix the **worker-thread 0x1E-storm UCO crash** (memory `cocoon-gameplay-uco-crash`) — now
+   the dominant blocker: the Unity job workers' nested 0x1E continuation must be delivered
+   off the CLR-GC path (same principle as the primary fix, applied to the pooled workers).
+2. Handle the **primary libunwind `4fU5yvOkVG4` NOT_FOUND spin** — either register the queried
+   ranges so the unwinder terminates, or extend the loop guard to multi-import unwinder loops.
+3. Re-apply the patch and re-validate; with both blockers cleared the dedicated cooperative
+   primary should give consistent ~30 fps with zero UCO (already demonstrated in d/e/i).
+
+The default behavior is unchanged (feature gated + reverted); the tree builds clean; nothing
+was pushed.
