@@ -57,6 +57,13 @@ SUSPEND_POINT = re.compile(r"suspendPoint")
 # run-spanning repeated-timeout flood on one (nid,handle,caller) is a stronger "stuck" signal.
 TIMED_OUT_WAIT = re.compile(
     r"Import#(\d+) result: ORBIS_GEN2_ERROR_TIMED_OUT \((\w+)\).*?rdi=0x([0-9A-Fa-f]+).*?ret=0x([0-9A-Fa-f]+)")
+# When SHARPEMU_LOG_SEMA is on, a host-parked poll-waiter logs sema.wait-host-block instead of the
+# generic timed-out WARN. Treat a run-spanning flood of these on one (handle, caller) as the same
+# stuck-fence signal (nid synthesised as the sema NID Zxa0VhQVTsk so NID_NAMES resolves it).
+SEMA_HOST_BLOCK = re.compile(
+    r"sema\.wait-host-block handle=0x0*([0-9A-Fa-f]+) name='([^']*)'.*?ret=0x([0-9A-Fa-f]+)")
+WINDOW_CLOSED = re.compile(r"Host shutdown requested: videoout-window-closed")
+CACHE_SAVED = re.compile(r"pipeline cache saved")
 
 # Common spin/wait NIDs so the terminal report is human-readable without an aerolib round-trip.
 NID_NAMES = {
@@ -102,6 +109,8 @@ def parse(path):
         "first_frame": 0,     # count
         "suspend_point": 0,   # count -- gameplay progress proxy (weak; see timed_out below)
         "timed_out": [],      # (lineno, import_index, nid, handle, caller)
+        "window_closed": 0,   # user closed the VideoOut window (usually after a visible stall)
+        "cache_saved": 0,     # pipeline-cache saves (sustained gameplay corroboration)
     }
     with open(path, "r", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
@@ -146,6 +155,19 @@ def parse(path):
                 events["timed_out"].append(
                     (lineno, m.group(1), m.group(2), norm_handle("0x" + m.group(3)),
                      "0x" + m.group(4)))
+                continue
+            m = SEMA_HOST_BLOCK.search(line)
+            if m:
+                # import# unknown from this trace line; use lineno as an ordering proxy.
+                events["timed_out"].append(
+                    (lineno, str(lineno), "Zxa0VhQVTsk", norm_handle("0x" + m.group(1)),
+                     "0x" + m.group(3)))
+                continue
+            if WINDOW_CLOSED.search(line):
+                events["window_closed"] += 1
+                continue
+            if CACHE_SAVED.search(line):
+                events["cache_saved"] += 1
                 continue
             if FIRST_FRAME.search(line):
                 events["first_frame"] += 1
@@ -199,11 +221,14 @@ def analyze_terminal(events):
     ff = events["first_frame"]
     sp = events["suspend_point"]
     stuck = find_stuck_fence(events)
-    # suspendPoint alone is a weak proxy (a stall past first frame emits ~as many as a good run).
-    # A run-spanning stuck fence-poll overrides it: the game reached the render loop but wedged.
-    reached_gameplay = sp >= 10 and stuck is None
-    print(f"  first_frame_presented={ff}  suspendPoint(weak gameplay proxy)={sp}  "
-          f"-> {'reached gameplay' if reached_gameplay else 'did NOT reach sustained gameplay'}")
+    # suspendPoint alone is a weak proxy: a run that reaches the render loop then wedges emits ~as
+    # many forced suspends (~13-31) as a sustained-gameplay run (~33). Require a STRONG signal:
+    # a high suspend count AND >1 pipeline-cache save AND no stuck fence. A run the user closed via
+    # the VideoOut window after few suspends is a stall, not gameplay.
+    reached_gameplay = sp >= 25 and events["cache_saved"] >= 2 and stuck is None
+    print(f"  first_frame_presented={ff}  suspendPoint(weak proxy)={sp}  "
+          f"pipeline_cache_saves={events['cache_saved']}  window_closed_by_user={events['window_closed']}  "
+          f"-> {'reached sustained gameplay' if reached_gameplay else 'did NOT reach sustained gameplay'}")
     if stuck is not None:
         name = NID_NAMES.get(stuck["nid"], "?")
         print(f"  [!] STUCK FENCE POLL: nid={stuck['nid']} ({name}) handle={stuck['handle']} "

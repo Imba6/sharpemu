@@ -54,12 +54,16 @@ Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach
 [INFO][SharpEmu.CLI] Program.cs:376 Summary: result=ORBIS_GEN2_ERROR_NOT_IMPLEMENTED reason=NativeBackendUnavailable exit=? last_guest_rip=0x0000000800000070
 """
 
+# A sustained-gameplay run: 33 forced suspends AND multiple pipeline-cache saves (the strong signal).
 GOOD_RUN = """\
 [LOADER][LOADSTART] module_start.begin seq=3 module='PSNCore.prx' init=0x0000000809D28010 guest_thread=0x0000000809AA0000
 [LOADER][LOADSTART] module_start.complete seq=3 module='PSNCore.prx' started=True elapsed_ms=1 guest_thread=0x0000000809AA0000
 [LOADER][INFO] sceKernelLoadStartModule started 'PSNCore.prx' at 0x0000000809D28010
 [LOADER][INFO] Vulkan VideoOut presented first frame: 3840x2160
-""" + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 20
+[LOADER][INFO] Vulkan pipeline cache saved: bytes=42035339
+[LOADER][INFO] Vulkan pipeline cache saved: bytes=42035340
+[LOADER][INFO] Vulkan pipeline cache saved: bytes=42035341
+""" + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 33
 
 MODULE_STALL = """\
 [LOADER][LOADSTART] module_start.begin seq=5 module='PSNCommon.prx' init=0x0000000809B1A010 guest_thread=0x0000000809AA0000
@@ -107,6 +111,8 @@ class TerminalOutcomeTests(unittest.TestCase):
             "[LOADER][INFO] sceKernelLoadStartModule started 'PSNCore.prx' at 0x0000000809D28010\n"
             "[LOADER][INFO] sceKernelLoadStartModule started 'SaveData.prx' at 0x0000000809FA1010\n"
             "[LOADER][INFO] Vulkan VideoOut presented first frame: 3840x2160\n"
+            "[LOADER][INFO] Vulkan pipeline cache saved: bytes=1\n"
+            "[LOADER][INFO] Vulkan pipeline cache saved: bytes=2\n"
             + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 40
         )
         events, _ = _parse_text(text)
@@ -157,13 +163,36 @@ class TerminalOutcomeTests(unittest.TestCase):
         # A good run polls the same fence only ~15x before it is posted -> below threshold, not stuck.
         line = ("[LOADER][WARN] Import#{i} result: ORBIS_GEN2_ERROR_TIMED_OUT (Zxa0VhQVTsk) "
                 "rdi=0x0000000000000086 rsi=0x1 rdx=0x0 rcx=0x0 ret=0x0000000800D18129\n")
-        text = ("Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 20
+        text = ("[LOADER][INFO] Vulkan pipeline cache saved: bytes=1\n"
+                "[LOADER][INFO] Vulkan pipeline cache saved: bytes=2\n"
+                + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 30
                 + "".join(line.format(i=2747462 + n) for n in range(15)))
         events, _ = _parse_text(text)
         self.assertIsNone(azr.find_stuck_fence(events))
         with contextlib.redirect_stdout(io.StringIO()):
             ok, reached = azr.analyze_terminal(events)
         self.assertTrue(reached)
+
+    def test_sema_host_block_flood_and_window_close_are_detected(self):
+        # Stage-11C shape: SHARPEMU_LOG_SEMA on -> the host-parked poll-waiter logs sema.wait-host-block
+        # (not the generic timed-out WARN). A run-spanning flood on one (handle, caller) must still be a
+        # stuck fence, and the user-close must be recorded.
+        block = ("[LOADER][TRACE] sema.wait-host-block handle=0x00000086 name='Baselib_SystemSemaphore' "
+                 "need=1 count=0 timeout=1000 guest=0x0000000000000000 ret=0x0000000800D18129\n")
+        text = ("[LOADER][INFO] Vulkan pipeline cache saved: bytes=1\n"
+                + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 13
+                + block * 300
+                + "[LOADER][INFO] Host shutdown requested: videoout-window-closed\n")
+        events, _ = _parse_text(text)
+        self.assertEqual(events["window_closed"], 1)
+        self.assertEqual(events["cache_saved"], 1)
+        stuck = azr.find_stuck_fence(events)
+        self.assertIsNotNone(stuck)
+        self.assertEqual(stuck["handle"], "0x86")
+        self.assertEqual(stuck["nid"], "Zxa0VhQVTsk")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, reached = azr.analyze_terminal(events)
+        self.assertFalse(reached)  # host-block flood + 1 cache save + 13 suspends != sustained gameplay
 
     def test_module_stall_is_detected(self):
         events, _ = _parse_text(MODULE_STALL)
