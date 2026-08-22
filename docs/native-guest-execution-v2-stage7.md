@@ -76,3 +76,65 @@ over ≥10 runs) — a single non-crash is not proof. The gated experiment
 
 Three read-only sub-agents (registration/scan identity; normal-worker-migration evidence;
 `DeliverException` comment git-history) + direct reading. None edited the tree.
+
+## Experiment result — Option 2 VALIDATED (gated, corruption-free)
+
+Built behind `SHARPEMU_EXPERIMENT_0X1E_RENTED_WORKER=1` (requires V2). Two-part change:
+1. The three 0x1E delivery call sites (`DeliverException`, safe-point, host-park) pass a new
+   `deliverOnNativeWorker` flag through `TryCallGuestFunction` →
+   `ExecuteGuestThreadEntry(reentrant:false)` and `ResumeBlockedNestedGuestCallback` →
+   `ExecuteBlockedGuestThreadContinuation(reentrant:false)`, so the handler AND its
+   resume-handshake slices run on rented pool workers (native base) instead of inline on the
+   CLR-managed runner.
+2. Generalized: `ShouldRunGuestOnNativeWorker` routes **all** nested/reentrant guest
+   execution (module `DT_INIT` via `sceKernelLoadStartModule`, guest callbacks, the 0x1E
+   handler) onto rented workers under the flag — no guest frame ever runs above a live
+   managed frame during a concurrent GC.
+
+Validated with the dedicated-primary patch applied (to reach the worker-storm regime),
+`SHARPEMU_NATIVE_WORKER_MAX=128`, `SHARPEMU_UCO_FLIGHT=1` + `SHARPEMU_LOG_GUEST_EXCEPTIONS=1`.
+
+**Staged evidence.** First, 0x1E-only routing (per-caller flag, module-init still inline): the
+0x1E handler delivered on rented workers **709 / 601 times in two runs with zero 0x1E UCO**
+(`guest_exception.delivery_exit success=True`), and the crash *moved* off the 0x1E path
+entirely (`safe_point`=0 everywhere) onto `sceKernelLoadStartModule` module-init — proving
+the rented-worker 0x1E delivery itself is sound and exposing module-init as the same
+guest-above-managed class.
+
+**Generalized run — 10 Cocoon sessions (`SHARPEMU_EXPERIMENT_0X1E_RENTED_WORKER=1`):**
+
+| Metric | Result |
+|---|---|
+| UnmanagedCallersOnly `__fastfail` (UCO) | **0 in 9/10** (the 1 is the pre-existing *top-level* module-initializer `ExecuteEntry` inline path — a `ModuleInitializer` frame not covered by this experiment or the primary patch, which only cooperativizes `ProcessEntry`) |
+| Heap/object/GC corruption (AV, heap-corrupt, double-free, TLSF) | **0 in 10/10** |
+| GC-suspend deadlock | none — runs proceed and present frames |
+| First-frame Vulkan present (3840×2160) | 4/10 reached it |
+| 0x1E deliveries per run | stable (~12 `delivery_exit success=True`); no 0x1E-attributed crash in any run |
+| Sustained ~30 fps gameplay | **not reached** — every run stalls on the pre-existing **unresolved-import spin** (`VkqLPArfFdc` / `4fU5yvOkVG4`, ~2.79–2.92 M imports) = blocker #2, out of scope |
+
+**Verdict: Option 2 is semantically valid AND empirically corruption-free.** Routing the
+0x1E handler (and, generally, reentrant guest execution) onto rented pool workers eliminates
+the guest-above-managed UCO class with **no evidence of silent GC corruption** across 10
+runs — exactly as the identity audit predicted (the collector's identity is the logical guest
+context, carried by the worker, not the host OS thread). **Option 1 (pin a native worker per
+guest thread) is therefore NOT required** — the pooled-worker scalability of Stage 2/3 can be
+kept.
+
+## Remaining blockers (all separate, out of this milestone's scope)
+
+1. **Top-level module-initializer inline path** (1/10 crash, g6): `ModuleInitializer` frames
+   still run inline on the CLR main thread via `ExecuteEntry` (the primary patch only
+   cooperativizes `ProcessEntry`). Same guest-above-managed class; fixable by extending the
+   dedicated-worker/cooperative treatment to `ModuleInitializer` frames.
+2. **Unresolved-import spin** (`VkqLPArfFdc`, `4fU5yvOkVG4` = `sceSysmoduleGetModuleInfoForUnwind`):
+   the guest loops on unresolved imports (~2.9 M) after first-frame present. Compatibility
+   gap (blocker #2). The experiment *advanced* the guest to this point by removing the
+   earlier module-init crash — forward progress. Must stay a separate milestone.
+
+## Recommendation
+
+Proceed with **Option 2** as the production direction (rented-worker 0x1E delivery; keep the
+pool). Next steps, in order and as separate commits: (a) land the rented-worker 0x1E delivery
+un-gated for the covered paths once the module-init and unresolved-import blockers are
+cleared; (b) extend the cooperative/worker treatment to `ModuleInitializer` frames; (c) the
+unresolved-import spin (blocker #2). The gated experiment is retained as the proof.

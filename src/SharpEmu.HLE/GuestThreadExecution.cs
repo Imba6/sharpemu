@@ -84,7 +84,8 @@ public interface IGuestThreadScheduler
         ulong stackAddress,
         ulong stackSize,
         string reason,
-        out string? error);
+        out string? error,
+        bool deliverOnNativeWorker = false);
 
     bool TryCallGuestFunction(
         CpuContext callerContext,
@@ -96,7 +97,8 @@ public interface IGuestThreadScheduler
         ulong stackSize,
         string reason,
         out ulong returnValue,
-        out string? error);
+        out string? error,
+        bool deliverOnNativeWorker = false);
 
     bool TryCallGuestContinuation(
         CpuContext callerContext,

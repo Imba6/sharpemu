@@ -308,7 +308,8 @@ public sealed class HostParkInterruptTests
             ulong stackAddress,
             ulong stackSize,
             string reason,
-            out string? error)
+            out string? error,
+            bool deliverOnNativeWorker = false)
         {
             error = "not supported";
             return false;
@@ -324,7 +325,8 @@ public sealed class HostParkInterruptTests
             ulong stackSize,
             string reason,
             out ulong returnValue,
-            out string? error)
+            out string? error,
+            bool deliverOnNativeWorker = false)
         {
             returnValue = 0;
             error = "not supported";

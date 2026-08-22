@@ -94,7 +94,8 @@ public sealed class AvPlayerAllocationTests : IDisposable
             ulong stackAddress,
             ulong stackSize,
             string reason,
-            out string? error)
+            out string? error,
+            bool deliverOnNativeWorker = false)
         {
             error = "not supported";
             return false;
@@ -110,7 +111,8 @@ public sealed class AvPlayerAllocationTests : IDisposable
             ulong stackSize,
             string reason,
             out ulong returnValue,
-            out string? error)
+            out string? error,
+            bool deliverOnNativeWorker = false)
         {
             CallCount++;
             returnValue = 0;

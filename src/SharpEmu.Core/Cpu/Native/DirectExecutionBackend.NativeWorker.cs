@@ -40,7 +40,27 @@ public sealed partial class DirectExecutionBackend
 	internal static readonly bool NativeGuestV2Enabled =
 		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_GUEST_V2"), "1", StringComparison.Ordinal);
 
+	// V2 stage 7 EXPERIMENT (gated, default off; requires V2). Deliver the guest 0x1E
+	// GC-suspend handler (and its resume) on a RENTED pool worker (native base, GC-safe)
+	// instead of inline on the CLR-managed GuestExecutionRunner (guest-above-managed, which
+	// crashes under Cocoon's ~20-thread Boehm suspend storm -- Stage 6). The Stage-7 identity
+	// audit proved the collector's suspend/scan identity is the LOGICAL GUEST context (handle
+	// + guest stack + guest register ucontext), not a host OS thread, and normal V2 execution
+	// already migrates guest code across pooled workers -- so a rented worker with the guest
+	// context presents an identical native-context identity. This flag validates that
+	// empirically (watch for silent GC corruption, not just "did not crash once").
+	internal static readonly bool Experiment0x1ERentedWorker =
+		NativeGuestV2Enabled &&
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EXPERIMENT_0X1E_RENTED_WORKER"), "1", StringComparison.Ordinal);
+
 	private bool ShouldRunGuestOnNativeWorker(string name, bool reentrant) =>
+		// V2 stage 7 experiment: route NESTED/reentrant guest execution (0x1E handler +
+		// resume, module DT_INIT via sceKernelLoadStartModule, other guest callbacks) onto
+		// rented native workers too, so no guest frame ever runs above a live managed frame
+		// during a concurrent GC. This is the general form of the rented-worker delivery the
+		// identity audit cleared -- it tests whether making ALL nested guest execution
+		// GC-safe eliminates the guest-above-managed __fastfail class.
+		Experiment0x1ERentedWorker ||
 		ShouldRunGuestOnNativeWorker(name, reentrant, NativeGuestV2Enabled);
 
 	// tbb_thead always runs on a native worker; V2 additionally routes ordinary

@@ -4452,7 +4452,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong stackAddress,
 		ulong stackSize,
 		string reason,
-		out string? error)
+		out string? error,
+		bool deliverOnNativeWorker = false)
 	{
 		return TryCallGuestFunction(
 			callerContext,
@@ -4464,7 +4465,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			stackSize,
 			reason,
 			out _,
-			out error);
+			out error,
+			deliverOnNativeWorker);
 	}
 
 	public bool TryCallGuestFunction(
@@ -4477,7 +4479,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong stackSize,
 		string reason,
 		out ulong returnValue,
-		out string? error)
+		out string? error,
+		bool deliverOnNativeWorker = false)
 	{
 		returnValue = 0;
 		error = null;
@@ -4573,10 +4576,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			LastError = null;
 			// Nested host->guest re-entry stays inline (reentrant): it already runs on the
 			// caller's native base under V2, and inline preserves on-thread 0x1E host-park
-			// delivery (this path serves TryDeliverQueuedGuestException).
-			var exitReason = ExecuteGuestThreadEntry(context, entryPoint, reason, out var callbackReason, reentrant: true);
+			// delivery (this path serves TryDeliverQueuedGuestException). EXCEPTION (V2 stage 7
+			// experiment): when deliverOnNativeWorker is set, run the guest 0x1E handler and its
+			// resume on a RENTED pool worker (reentrant:false -> native base, GC-safe) so it is
+			// never guest-above-managed above the caller's live import / managed runner frame.
+			var exitReason = ExecuteGuestThreadEntry(context, entryPoint, reason, out var callbackReason, reentrant: !deliverOnNativeWorker);
 			if (exitReason == GuestNativeCallExitReason.Blocked &&
-				!ResumeBlockedNestedGuestCallback(context, reason, ref exitReason, ref callbackReason))
+				!ResumeBlockedNestedGuestCallback(context, reason, ref exitReason, ref callbackReason, deliverOnNativeWorker))
 			{
 				error = callbackReason ?? LastError ?? "guest callback could not resume after blocking";
 				return false;
@@ -4613,7 +4619,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		CpuContext callbackContext,
 		string reason,
 		ref GuestNativeCallExitReason exitReason,
-		ref string? callbackReason)
+		ref string? callbackReason,
+		bool deliverOnNativeWorker = false)
 	{
 		var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
 		if (guestThreadHandle == 0)
@@ -4715,7 +4722,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				continuation,
 				reason,
 				out callbackReason,
-				reentrant: true);
+				reentrant: !deliverOnNativeWorker);
 		}
 
 		if (exitReason == GuestNativeCallExitReason.Blocked && ActiveForcedGuestExit)
@@ -5195,7 +5202,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						exceptionStackBase + callbackStackOffset,
 						callbackStackSize,
 						$"kernel exception 0x{exceptionType:X2}",
-						out deliveryError);
+						out deliveryError,
+						deliverOnNativeWorker: Experiment0x1ERentedWorker);
 				if (!deliverySucceeded)
 				{
 					Console.Error.WriteLine(
@@ -5384,7 +5392,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					pending.ExceptionStackBase + callbackStackOffset,
 					callbackStackSize,
 					$"kernel exception 0x{pending.ExceptionType:X2} safe point",
-					out var callbackError))
+					out var callbackError,
+					deliverOnNativeWorker: Experiment0x1ERentedWorker))
 			{
 				Console.Error.WriteLine(
 					$"[LOADER][ERROR] Guest exception safe-point delivery failed: " +
