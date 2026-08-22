@@ -132,6 +132,39 @@ class TerminalOutcomeTests(unittest.TestCase):
         self.assertFalse(ok)       # not a success
         self.assertFalse(reached)  # did not reach gameplay -> FAILURE-case branch
 
+    def test_stuck_semaphore_fence_poll_overrides_suspendpoint(self):
+        # Stage-11B shape: 31 suspendPoints (as many as a good run) but a single semaphore fence
+        # (nid Zxa0VhQVTsk handle 0x86 caller 0x800D18129) times out hundreds of times, run-spanning.
+        # The stuck-fence signal must override suspendPoint and mark the run as NOT reaching gameplay.
+        line = ("[LOADER][WARN] Import#{i} result: ORBIS_GEN2_ERROR_TIMED_OUT (Zxa0VhQVTsk) "
+                "rdi=0x0000000000000086 rsi=0x0000000000000001 rdx=0x00007FFFF01FAC7C "
+                "rcx=0x000000000000000D ret=0x0000000800D18129\n")
+        text = ("[LOADER][INFO] Vulkan VideoOut presented first frame: 3840x2160\n"
+                + "Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 31
+                + "".join(line.format(i=2742828 + n * 16) for n in range(300)))
+        events, _ = _parse_text(text)
+        stuck = azr.find_stuck_fence(events)
+        self.assertIsNotNone(stuck)
+        self.assertEqual(stuck["handle"], "0x86")
+        self.assertEqual(stuck["nid"], "Zxa0VhQVTsk")
+        self.assertEqual(stuck["count"], 300)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, reached = azr.analyze_terminal(events)
+        self.assertFalse(reached)  # suspendPoint=31 must NOT count as gameplay when a fence is stuck
+        self.assertFalse(ok)
+
+    def test_few_timeouts_are_not_a_stuck_fence(self):
+        # A good run polls the same fence only ~15x before it is posted -> below threshold, not stuck.
+        line = ("[LOADER][WARN] Import#{i} result: ORBIS_GEN2_ERROR_TIMED_OUT (Zxa0VhQVTsk) "
+                "rdi=0x0000000000000086 rsi=0x1 rdx=0x0 rcx=0x0 ret=0x0000000800D18129\n")
+        text = ("Forcing call to sce::Agc::suspendPoint to avoid TRC R4089 breach\n" * 20
+                + "".join(line.format(i=2747462 + n) for n in range(15)))
+        events, _ = _parse_text(text)
+        self.assertIsNone(azr.find_stuck_fence(events))
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok, reached = azr.analyze_terminal(events)
+        self.assertTrue(reached)
+
     def test_module_stall_is_detected(self):
         events, _ = _parse_text(MODULE_STALL)
         table = azr.build_loadstart_table(events)

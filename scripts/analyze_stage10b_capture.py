@@ -51,6 +51,12 @@ BACKEND_FAILED = re.compile(r"\[DISPATCHER\] Native backend FAILED: (.*)$")
 SUMMARY = re.compile(r"Summary: result=(\S+) reason=(\S+)")
 FIRST_FRAME = re.compile(r"presented first frame")
 SUSPEND_POINT = re.compile(r"suspendPoint")
+# A guest thread polling one semaphore/equeue handle that never completes (finite-timeout fence
+# poll that always times out) is the Stage-11B stall signature. suspendPoint count alone does NOT
+# prove sustained gameplay -- both a good run and this stall emit ~30 forced suspends -- so a large,
+# run-spanning repeated-timeout flood on one (nid,handle,caller) is a stronger "stuck" signal.
+TIMED_OUT_WAIT = re.compile(
+    r"Import#(\d+) result: ORBIS_GEN2_ERROR_TIMED_OUT \((\w+)\).*?rdi=0x([0-9A-Fa-f]+).*?ret=0x([0-9A-Fa-f]+)")
 
 # Common spin/wait NIDs so the terminal report is human-readable without an aerolib round-trip.
 NID_NAMES = {
@@ -94,7 +100,8 @@ def parse(path):
         "backend_failed": [], # (lineno, detail)
         "summary": [],        # (lineno, result, reason)
         "first_frame": 0,     # count
-        "suspend_point": 0,   # count -- gameplay progress proxy
+        "suspend_point": 0,   # count -- gameplay progress proxy (weak; see timed_out below)
+        "timed_out": [],      # (lineno, import_index, nid, handle, caller)
     }
     with open(path, "r", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
@@ -134,12 +141,36 @@ def parse(path):
             if m:
                 events["summary"].append((lineno, m.group(1), m.group(2)))
                 continue
+            m = TIMED_OUT_WAIT.search(line)
+            if m:
+                events["timed_out"].append(
+                    (lineno, m.group(1), m.group(2), norm_handle("0x" + m.group(3)),
+                     "0x" + m.group(4)))
+                continue
             if FIRST_FRAME.search(line):
                 events["first_frame"] += 1
                 continue
             if SUSPEND_POINT.search(line):
                 events["suspend_point"] += 1
     return events
+
+
+def find_stuck_fence(events, threshold=200):
+    """Return the dominant (nid, handle, caller) finite-wait that times out repeatedly and spans to
+    near the end of the log, or None. This is the Stage-11B 'stuck fence poll' signature."""
+    from collections import Counter
+    if not events["timed_out"]:
+        return None
+    groups = Counter((nid, handle, caller) for _, _, nid, handle, caller in events["timed_out"])
+    (nid, handle, caller), count = groups.most_common(1)[0]
+    if count < threshold:
+        return None
+    lines = [ln for ln, _, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller)]
+    first_imp = next(imp for _, imp, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller))
+    last_imp = [imp for _, imp, n, h, c in events["timed_out"] if (n, h, c) == (nid, handle, caller)][-1]
+    return {"nid": nid, "handle": handle, "caller": caller, "count": count,
+            "first_line": lines[0], "last_line": lines[-1],
+            "first_import": first_imp, "last_import": last_imp}
 
 
 def build_loadstart_table(events):
@@ -167,9 +198,19 @@ def analyze_terminal(events):
     print("\n-- Terminal outcome / progress --")
     ff = events["first_frame"]
     sp = events["suspend_point"]
-    reached_gameplay = sp >= 10  # good runs show tens of Agc suspendPoints; a preload stall shows ~2
-    print(f"  first_frame_presented={ff}  suspendPoint(gameplay proxy)={sp}  "
+    stuck = find_stuck_fence(events)
+    # suspendPoint alone is a weak proxy (a stall past first frame emits ~as many as a good run).
+    # A run-spanning stuck fence-poll overrides it: the game reached the render loop but wedged.
+    reached_gameplay = sp >= 10 and stuck is None
+    print(f"  first_frame_presented={ff}  suspendPoint(weak gameplay proxy)={sp}  "
           f"-> {'reached gameplay' if reached_gameplay else 'did NOT reach sustained gameplay'}")
+    if stuck is not None:
+        name = NID_NAMES.get(stuck["nid"], "?")
+        print(f"  [!] STUCK FENCE POLL: nid={stuck['nid']} ({name}) handle={stuck['handle']} "
+              f"caller=0x{int(stuck['caller'],16):X} timed out {stuck['count']}x "
+              f"from import#{stuck['first_import']} to #{stuck['last_import']} (L{stuck['first_line']}"
+              f"..L{stuck['last_line']}) -> a guest thread polls this fence forever; it is never "
+              f"posted. The run reached the render loop but never sustained gameplay.")
 
     for ln, imp, nid, ret in events["guard_fired"]:
         name = NID_NAMES.get(nid, "?")
