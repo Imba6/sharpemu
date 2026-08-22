@@ -1114,6 +1114,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	/// </summary>
 	internal void SetActiveDebugFrame(ICpuDebugFrame? frame) => _activeDebugFrame = frame;
 
+	// V2 stage 8: true while the entry about to run in ExecuteEntry is a boot module
+	// initializer (DispatchModuleInitializer / frameKind==ModuleInitializer) rather than
+	// the process entry. The debug frame is null without a debugger, so the dispatcher
+	// sets this flag directly; ExecuteEntry uses it to route the module DT_INIT onto a
+	// rented native worker (GC-safe) instead of the inline CLR-main-thread CallNativeEntry
+	// that __fastfails under a concurrent GC. Module inits have no guest identity
+	// (IsGuestThread==false) so their kernel waits host-park and they run to completion --
+	// safe to run synchronously on a worker without EnterGuestThread.
+	private bool _activeEntryIsModuleInitializer;
+
+	internal void SetActiveEntryIsModuleInitializer(bool value) =>
+		_activeEntryIsModuleInitializer = value;
+
 	/// <summary>
 	/// Notifies an attached debugger of a detected execution stall. No-op when no
 	/// debugger is attached or no frame is bound. The debugger may block here to
@@ -6926,7 +6939,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			int num6 = -1;
 			try
 			{
-				num6 = CallNativeEntry(ptr);
+				// V2 stage 8: a boot module initializer runs arbitrary guest DT_INIT code
+				// that reverse-P/Invokes into HLE; inline on the CLR main thread that is the
+				// guest-above-managed shape which __fastfails under a concurrent GC. Route it
+				// onto a rented native worker (clean native base). A module init has no guest
+				// identity (IsGuestThread stays false on the worker, so its kernel waits
+				// host-park and it runs to completion), so num6 remains a genuine return
+				// value. requireNativeWorker:false keeps the inline fallback if the pool is
+				// momentarily unavailable. The process entry stays inline (Stage 5 handles it).
+				num6 = (NativeGuestV2Enabled && _activeEntryIsModuleInitializer)
+					? RunGuestEntryStub(ptr, num2, requireNativeWorker: false)
+					: CallNativeEntry(ptr);
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest
 				// continuations here can re-enter a blocked HLE call after its owner

@@ -290,6 +290,10 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         _nativeCpuBackend ??= new DirectExecutionBackend(_moduleManager);
         // Let backend stall reports reference the same frame as entry.
         (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveDebugFrame(debugFrame);
+        // V2 stage 8: tell the backend when this top-level entry is a boot module
+        // initializer, so it routes the DT_INIT onto a GC-safe native worker.
+        (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveEntryIsModuleInitializer(
+            frameKind == EntryFrameKind.ModuleInitializer);
         if (_nativeCpuBackend.TryExecute(
                 context,
                 entryPoint,
