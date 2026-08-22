@@ -69,6 +69,13 @@ public sealed partial class DirectExecutionBackend
 	internal static bool ShouldRunGuestOnNativeWorker(string name, bool reentrant, bool v2Enabled) =>
 		name == "tbb_thead" || (v2Enabled && !reentrant);
 
+	// V2 stage 8: a top-level boot module initializer runs arbitrary guest DT_INIT code on
+	// the CLR main thread (guest-above-managed, __fastfails under GC). Under V2 route it onto
+	// a rented native worker; the process entry is NOT routed here (Stage 5 owns it). Pure
+	// decision, exposed for tests.
+	internal static bool ShouldRunModuleInitializerOnNativeWorker(bool isModuleInitializer, bool v2Enabled) =>
+		v2Enabled && isModuleInitializer;
+
 	// High-water mark for concurrent native-worker runs (= peak live OS worker
 	// threads). Native Guest Execution V2 stage 2 replaced the historical fixed cap
 	// of 2 with a grow-on-demand NativeWorkerPool. That cap existed only to throttle

@@ -6947,7 +6947,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				// host-park and it runs to completion), so num6 remains a genuine return
 				// value. requireNativeWorker:false keeps the inline fallback if the pool is
 				// momentarily unavailable. The process entry stays inline (Stage 5 handles it).
-				num6 = (NativeGuestV2Enabled && _activeEntryIsModuleInitializer)
+				num6 = ShouldRunModuleInitializerOnNativeWorker(_activeEntryIsModuleInitializer, NativeGuestV2Enabled)
 					? RunGuestEntryStub(ptr, num2, requireNativeWorker: false)
 					: CallNativeEntry(ptr);
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
