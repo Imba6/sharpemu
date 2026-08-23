@@ -74,6 +74,32 @@ public readonly record struct SyncSnapshotEventFlag(
     ulong Bits,
     int Waiters);
 
+// --------------------------------------------------------------------------- #
+// Raw registry entries returned by the per-primitive read-only enumerators.
+// These carry the monitor-gate identity (GateId) so the collector can bind a
+// host-parked waiter to its wait object without any reverse index.
+// --------------------------------------------------------------------------- #
+
+/// <summary>Raw semaphore registry entry (LastSignaler is diagnostic-only).</summary>
+public readonly record struct SemaphoreSnapshotEntry(
+    ulong Handle,
+    string Name,
+    int Count,
+    int Max,
+    int Waiters,
+    string WakeKey,
+    long GateId,
+    ulong LastSignalerHandle);
+
+/// <summary>Raw event-flag registry entry.</summary>
+public readonly record struct EventFlagSnapshotEntry(
+    ulong Handle,
+    string Name,
+    ulong Bits,
+    int Waiters,
+    string WakeKey,
+    long GateId);
+
 /// <summary>All state gathered for one snapshot.</summary>
 public sealed class SyncSnapshotData
 {

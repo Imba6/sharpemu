@@ -247,6 +247,35 @@ public static class GuestThreadExecution
     }
 
     /// <summary>
+    /// One host-parked waiter for a read-only diagnostic snapshot. GateId is the
+    /// runtime identity hash of the monitor the thread parked on, used to match
+    /// the park to its sync object (semaphore/event flag) without any reverse
+    /// index and without touching park/wake semantics.
+    /// </summary>
+    public readonly record struct HostParkSnapshotEntry(ulong ThreadHandle, long GateId);
+
+    /// <summary>
+    /// Read-only enumeration of the current host-park registrations. Diagnostic
+    /// only; takes the registry gate briefly and copies out identities. Nested
+    /// parks report the innermost (current) registration per thread.
+    /// </summary>
+    public static IReadOnlyList<HostParkSnapshotEntry> SnapshotHostParks()
+    {
+        lock (_hostParkRegistryGate)
+        {
+            var list = new List<HostParkSnapshotEntry>(_hostParkRegistry.Count);
+            foreach (var kv in _hostParkRegistry)
+            {
+                list.Add(new HostParkSnapshotEntry(
+                    kv.Key,
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(kv.Value.Gate)));
+            }
+
+            return list;
+        }
+    }
+
+    /// <summary>
     /// Wakes the host thread parked under <paramref name="threadHandle"/> so its
     /// wait loop re-evaluates pending guest state (for example a just-queued kernel
     /// exception). This only pulses the park Monitor; it never records progress on

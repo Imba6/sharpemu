@@ -85,6 +85,14 @@ public static class VideoOutExports
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
+
+    /// <summary>
+    /// Monotonic count of guest flip submissions. Always incremented (not
+    /// log-gated), so it is the truest "the game is still presenting frames"
+    /// forward-progress signal for the sync-stall snapshot trigger — unlike raw
+    /// import count, a busy spin does not advance it. Read-only diagnostic.
+    /// </summary>
+    public static int DiagnosticFlipCount => System.Threading.Volatile.Read(ref _diagnosticFlipCount);
     private static readonly int _holdFirstFlipMilliseconds =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_HOLD_FIRST_FLIP_MS"), out var holdMs)
             ? Math.Clamp(holdMs, 0, 60_000)

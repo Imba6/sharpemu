@@ -52,6 +52,17 @@ internal static class KernelPthreadState
         return _currentThreadUniqueId;
     }
 
+    /// <summary>
+    /// Read-only name lookup for a thread handle, for the sync-stall diagnostic.
+    /// Returns the registered name (typically the synthetic "Thread-{id}" for a
+    /// host-park/external-executor thread) or an empty string if unknown. Never
+    /// fabricates a guest-thread identity.
+    /// </summary>
+    public static string GetThreadName(ulong threadHandle) =>
+        threadHandle != 0 && TryGetThreadIdentity(threadHandle, out var identity)
+            ? identity.Name
+            : string.Empty;
+
     internal static string DescribeThreadHandle(ulong threadHandle)
     {
         if (threadHandle == 0)

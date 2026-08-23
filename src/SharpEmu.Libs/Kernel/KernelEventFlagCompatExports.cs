@@ -3,14 +3,39 @@
 
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Fiber;
 
 namespace SharpEmu.Libs.Kernel;
 
 public static class KernelEventFlagCompatExports
 {
+    /// <summary>
+    /// Read-only snapshot of every live event flag for the sync-stall diagnostic.
+    /// GateId (monitor identity hash) lets the collector bind a host-parked waiter
+    /// to this event flag. Diagnostic only; no behavior change.
+    /// </summary>
+    public static IReadOnlyList<EventFlagSnapshotEntry> SnapshotEventFlags()
+    {
+        var list = new List<EventFlagSnapshotEntry>(_eventFlags.Count);
+        foreach (var kv in _eventFlags)
+        {
+            var f = kv.Value;
+            list.Add(new EventFlagSnapshotEntry(
+                Handle: kv.Key,
+                Name: f.Name,
+                Bits: f.Bits,
+                Waiters: f.WaitingThreads,
+                WakeKey: GetEventFlagWakeKey(kv.Key),
+                GateId: RuntimeHelpers.GetHashCode(f.Gate)));
+        }
+
+        return list;
+    }
     private const int MaxEventFlagNameLength = 31;
     private const int HostWaitPumpMilliseconds = 1;
     private const uint AttrThreadFifo = 0x01;

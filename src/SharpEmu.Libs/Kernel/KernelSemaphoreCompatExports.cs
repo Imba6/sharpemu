@@ -3,8 +3,11 @@
 
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -13,6 +16,32 @@ public static class KernelSemaphoreCompatExports
     private const int MaxSemaphoreNameLength = 128;
     private static readonly ConcurrentDictionary<uint, KernelSemaphoreState> _semaphores = new();
     private static int _nextSemaphoreHandle = 1;
+
+    /// <summary>
+    /// Read-only snapshot of every live semaphore for the sync-stall diagnostic.
+    /// Count/WaitingThreads are read lock-free (torn-free ints); GateId is the
+    /// runtime identity hash of the monitor gate, used to bind host-parked waiters
+    /// to their wait object. Diagnostic only; no behavior change.
+    /// </summary>
+    public static IReadOnlyList<SemaphoreSnapshotEntry> SnapshotSemaphores()
+    {
+        var list = new List<SemaphoreSnapshotEntry>(_semaphores.Count);
+        foreach (var kv in _semaphores)
+        {
+            var s = kv.Value;
+            list.Add(new SemaphoreSnapshotEntry(
+                Handle: kv.Key,
+                Name: s.Name,
+                Count: s.Count,
+                Max: s.MaxCount,
+                Waiters: s.WaitingThreads,
+                WakeKey: s.WakeKey,
+                GateId: RuntimeHelpers.GetHashCode(s.Gate),
+                LastSignalerHandle: s.LastSignalerThreadHandle));
+        }
+
+        return list;
+    }
 
     private sealed class KernelSemaphoreState
     {
@@ -24,6 +53,10 @@ public static class KernelSemaphoreCompatExports
         public int Count { get; set; }
         public int WaitingThreads { get; set; }
         public object Gate { get; } = new();
+        // Diagnostic-only: last thread to signal this semaphore. Written under Gate
+        // on signal; read only by the sync-snapshot enumerator. Does not affect
+        // wait/signal semantics.
+        public ulong LastSignalerThreadHandle { get; set; }
     }
 
     [SysAbiExport(
@@ -352,6 +385,7 @@ public static class KernelSemaphoreCompatExports
             }
 
             semaphore.Count += signalCount;
+            semaphore.LastSignalerThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
             // Wake host-thread waiters parked in the fallback path.
             Monitor.PulseAll(semaphore.Gate);
             if (_traceSema)
