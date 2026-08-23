@@ -305,6 +305,10 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 		}
+		if (_diagGuestRipWatch != 0)
+		{
+			MaybeEmitGuestRipWatch(cpuContext, num7, importStubEntry.Nid);
+		}
 		// Diagnostic compatibility escape hatch for a guest stack-protector
 		// failure whose noreturn call is immediately followed by UD2.  Returning
 		// normally from the HLE export would execute that UD2; redirect this one
