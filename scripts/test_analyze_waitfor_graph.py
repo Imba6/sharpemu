@@ -127,6 +127,48 @@ UNKNOWN_SNAPSHOT = """
 """
 
 
+# The real Cocoon terminal shape: PreloadManager (cooperative) waits 0x84; the
+# 0x86 consumer is a host-parked external-executor thread (Thread-3). Once the
+# external signaler of 0x84 is named (Thread-3's handle), the cycle closes.
+COCOON_CYCLE = """
+[LOADER][DIAG] sync_snapshot.begin reason=stall seq=1
+[LOADER][DIAG] sync_snapshot.thread handle=0x2BD49ABC9E0 pthread=0x2BD49ABC9E0 name='Loading.PreloadManager' state=Blocked rip=0x800D17CFB resume_rip=0x0 host_tid=7 worker=inline wait=sema obj=0x84 key='sceKernelWaitSema:00000084' need=1 timeout=infinite parked=0 reentrant=0 wait_ms=6000
+[LOADER][DIAG] sync_snapshot.thread handle=0x2BD49AB89A0 pthread=0x2BD49AB89A0 name='Thread-3' state=Blocked rip=0x0 resume_rip=0x0 host_tid=0 worker=host wait=sema obj=0x86 key='sceKernelWaitSema:00000086' need=1 timeout=1000 parked=1 reentrant=0 wait_ms=6000
+[LOADER][DIAG] sync_snapshot.sema handle=0x86 name='Baselib_SystemSemaphore' count=0 max=2147483647 waiters=1 last_signaler=0x2BD49ABC9E0 last_signaler_name='Loading.PreloadManager'
+[LOADER][DIAG] sync_snapshot.sema handle=0x84 name='Baselib_SystemSemaphore' count=0 max=2147483647 waiters=1 last_signaler=0x2BD49AB89A0 last_signaler_name='Thread-3'
+[LOADER][DIAG] sync_snapshot.end seq=1 threads=2 blocked=2
+"""
+
+
+class CocoonCycleTest(unittest.TestCase):
+    def _parse(self, text):
+        s = wf.SyncSnapshot()
+        for line in text.strip("\n").splitlines():
+            s.feed_line(line)
+        return s
+
+    def test_0x86_0x84_cycle_closes_with_named_external_signaler(self):
+        s = self._parse(COCOON_CYCLE)
+        cycles = s.cycles()
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(set(cycles[0]), {"Loading.PreloadManager", "Thread-3"})
+
+    def test_consumer_is_host_parked_external(self):
+        s = self._parse(COCOON_CYCLE)
+        consumer = next(t for t in s.blocked_threads() if t["obj"] == "0x86")
+        self.assertEqual(consumer["name"], "Thread-3")
+        self.assertTrue(consumer["parked"])
+
+    def test_cycle_does_not_close_while_0x84_signaler_unknown(self):
+        # The as-captured state (before the diagnostic improvement): 0x84's
+        # signaler is UNKNOWN, so the cycle cannot auto-close — structural only.
+        anon = COCOON_CYCLE.replace(
+            "last_signaler=0x2BD49AB89A0 last_signaler_name='Thread-3'",
+            "last_signaler=UNKNOWN last_signaler_name=UNKNOWN")
+        s = self._parse(anon)
+        self.assertEqual(s.cycles(), [])
+
+
 class LiveSnapshotTest(unittest.TestCase):
     def _parse(self, text):
         s = wf.SyncSnapshot()

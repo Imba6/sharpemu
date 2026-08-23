@@ -17,6 +17,13 @@ public static class KernelSemaphoreCompatExports
     private static readonly ConcurrentDictionary<uint, KernelSemaphoreState> _semaphores = new();
     private static int _nextSemaphoreHandle = 1;
 
+    // When the sync-stall snapshot is enabled, record a resolvable identity for
+    // signalers that run on the external/primary executor (guest handle 0),
+    // instead of leaving them anonymous. Cached; off by default so the signal
+    // hot path is unchanged in normal runs.
+    private static readonly bool _diagSyncSnapshot = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_DIAG_SYNC_SNAPSHOT"), "1", StringComparison.Ordinal);
+
     /// <summary>
     /// Read-only snapshot of every live semaphore for the sync-stall diagnostic.
     /// Count/WaitingThreads are read lock-free (torn-free ints); GateId is the
@@ -385,7 +392,16 @@ public static class KernelSemaphoreCompatExports
             }
 
             semaphore.Count += signalCount;
-            semaphore.LastSignalerThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+            // Prefer the cooperative guest handle; for an external/primary-executor
+            // signaler (handle 0) fall back to the synthetic per-host-thread handle
+            // so the sync snapshot can name it (e.g. the 0x86/0x84 consumer). Gated
+            // so the default signal path is untouched.
+            var signalerHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+            if (signalerHandle == 0 && _diagSyncSnapshot)
+            {
+                signalerHandle = KernelPthreadState.GetCurrentThreadHandle();
+            }
+            semaphore.LastSignalerThreadHandle = signalerHandle;
             // Wake host-thread waiters parked in the fallback path.
             Monitor.PulseAll(semaphore.Gate);
             if (_traceSema)
