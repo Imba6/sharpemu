@@ -276,18 +276,257 @@ def render_text(g: WaitForGraph) -> str:
     return "\n".join(L)
 
 
+# --------------------------------------------------------------------------- #
+# Live sync-snapshot parser (authoritative point-in-time state)
+# --------------------------------------------------------------------------- #
+#
+# A live snapshot (emitted by the runtime under SHARPEMU_DIAG_SYNC_SNAPSHOT=1 or
+# SHARPEMU_DIAG_STALL_SNAPSHOT_MS) is a block of lines with a stable key=value
+# grammar. Unlike the historical reconstruction above, it carries the REAL
+# identity of host-parked waiters (no anonymous guest=0), so the wait-for graph
+# it yields is authoritative for the instant it was taken:
+#
+#   [LOADER][DIAG] sync_snapshot.begin reason=<str> seq=<n>
+#   [LOADER][DIAG] sync_snapshot.thread handle=0xH pthread=0xP name='NAME'
+#       state=<S> rip=0xR resume_rip=0xRR host_tid=<n> worker=<inline|worker:n|none>
+#       wait=<sema|mutex|equeue|eventflag|cond|none> obj=0xO key='K' need=<n>
+#       timeout=<us|infinite|none> parked=<0|1> reentrant=<0|1> wait_ms=<n>
+#   [LOADER][DIAG] sync_snapshot.sema handle=0xH name='NAME' count=<c> max=<m>
+#       waiters=<w> last_signaler=0xG last_signaler_name='NAME'
+#   [LOADER][DIAG] sync_snapshot.mutex obj=0xA name='NAME' owner=0xO
+#       owner_name='NAME' recursion=<n> waiters=<w> abandoned=<0|1>
+#   [LOADER][DIAG] sync_snapshot.equeue handle=0xH name='NAME' events=<n> waiters=<w>
+#   [LOADER][DIAG] sync_snapshot.eventflag handle=0xH name='NAME' bits=0xB waiters=<w>
+#   [LOADER][DIAG] sync_snapshot.end seq=<n> threads=<n> blocked=<n>
+#
+# The C# emitter MUST match this grammar. When a peer identity genuinely cannot
+# be recovered, the emitter writes the literal token UNKNOWN (never a fabricated
+# handle), and this parser preserves it verbatim.
+
+_SNAP_RE = re.compile(r"sync_snapshot\.(\w+)\s*(.*)$")
+
+# object-providing kinds: how you find the thread that would unblock a waiter.
+_PROVIDER_KEY = {
+    "sema": "last_signaler",   # who last posted it
+    "mutex": "owner",          # who holds it
+}
+
+
+class SyncSnapshot:
+    """Authoritative wait-for graph built from the LAST complete snapshot block."""
+
+    def __init__(self) -> None:
+        self.reason: Optional[str] = None
+        self.threads: List[dict] = []
+        self.objects: Dict[str, dict] = {}   # obj id -> record (incl. 'kind')
+        self._cur_threads: List[dict] = []
+        self._cur_objects: Dict[str, dict] = {}
+        self._in_block = False
+        self.present = False
+
+    def feed_line(self, line: str) -> None:
+        m = _SNAP_RE.search(line)
+        if not m:
+            return
+        self.present = True
+        kind, rest = m.group(1), m.group(2)
+        kv = az._parse_kv(rest)
+        if kind == "begin":
+            self._in_block = True
+            self._cur_threads = []
+            self._cur_objects = {}
+            self._cur_reason = kv.get("reason")
+            return
+        if kind == "end":
+            # commit the just-completed block (last one wins).
+            self.threads = self._cur_threads
+            self.objects = self._cur_objects
+            self.reason = getattr(self, "_cur_reason", None)
+            self._in_block = False
+            return
+        if not self._in_block:
+            return
+        if kind == "thread":
+            self._cur_threads.append(self._norm_thread(kv))
+        elif kind in ("sema", "mutex", "equeue", "eventflag"):
+            rec = {k: v for k, v in kv.items()}
+            rec["kind"] = kind
+            obj_id = az._norm_hex(kv.get("handle") or kv.get("obj"))
+            rec["id"] = obj_id
+            if obj_id:
+                self._cur_objects[obj_id] = rec
+
+    @staticmethod
+    def _norm_thread(kv: Dict[str, str]) -> dict:
+        return {
+            "handle": az._norm_hex(kv.get("handle")),
+            "pthread": az._norm_hex(kv.get("pthread")),
+            "name": kv.get("name", ""),
+            "state": kv.get("state", ""),
+            "rip": az._norm_hex(kv.get("rip")),
+            "resume_rip": az._norm_hex(kv.get("resume_rip")),
+            "host_tid": kv.get("host_tid"),
+            "worker": kv.get("worker"),
+            "wait": kv.get("wait", "none"),
+            "obj": az._norm_hex(kv.get("obj")),
+            "key": kv.get("key"),
+            "need": kv.get("need"),
+            "timeout": kv.get("timeout"),
+            "parked": kv.get("parked") == "1",
+            "reentrant": kv.get("reentrant") == "1",
+            "wait_ms": kv.get("wait_ms"),
+        }
+
+    def feed_file(self, path: str) -> None:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "sync_snapshot." in line:
+                    self.feed_line(line.rstrip("\n"))
+
+    # -- graph -------------------------------------------------------------- #
+
+    def _name_of(self, handle: Optional[str]) -> Optional[str]:
+        if not handle:
+            return None
+        for t in self.threads:
+            if t["handle"] == handle:
+                return t["name"] or handle
+        return handle
+
+    def blocked_threads(self) -> List[dict]:
+        return [t for t in self.threads if t["wait"] not in ("none", "", None)]
+
+    def _provider_handle(self, obj_id: Optional[str]) -> Optional[str]:
+        """Handle of the thread expected to unblock a waiter on obj_id, or the
+        literal 'UNKNOWN' when the snapshot could not recover it."""
+        if not obj_id or obj_id not in self.objects:
+            return None
+        rec = self.objects[obj_id]
+        field = _PROVIDER_KEY.get(rec["kind"])
+        if field is None:
+            return None  # external event source (equeue/eventflag)
+        val = rec.get(field)
+        if val is None or val == "UNKNOWN":
+            return val
+        return az._norm_hex(val)
+
+    def edges(self) -> List[dict]:
+        out = []
+        for t in self.blocked_threads():
+            provider = self._provider_handle(t["obj"])
+            out.append({
+                "thread": t["name"] or t["handle"],
+                "thread_handle": t["handle"],
+                "wait": t["wait"],
+                "obj": t["obj"],
+                "obj_name": (self.objects.get(t["obj"], {}) or {}).get("name"),
+                "key": t["key"],
+                "provider_handle": provider,
+                "provider": ("UNKNOWN" if provider == "UNKNOWN"
+                             else self._name_of(provider) if provider else None),
+                "parked": t["parked"],
+                "rip": t["rip"],
+            })
+        return out
+
+    def cycles(self) -> List[List[str]]:
+        # thread-handle -> provider-thread-handle (only resolvable providers).
+        blocked = {t["handle"]: t for t in self.blocked_threads() if t["handle"]}
+        dep: Dict[str, str] = {}
+        for h, t in blocked.items():
+            prov = self._provider_handle(t["obj"])
+            if prov and prov != "UNKNOWN" and prov in blocked:
+                dep[h] = prov
+        cycles: List[List[str]] = []
+        for start in dep:
+            path, node, local = [], start, set()
+            while node in dep and node not in local:
+                local.add(node)
+                path.append(node)
+                node = dep[node]
+            if node in local:
+                cyc = path[path.index(node):]
+                names = [self._name_of(h) for h in cyc]
+                if sorted(names) not in [sorted(c) for c in cycles]:
+                    cycles.append(names)
+        return cycles
+
+    def to_dict(self) -> dict:
+        return {
+            "source": "live-snapshot",
+            "reason": self.reason,
+            "threads": self.threads,
+            "objects": list(self.objects.values()),
+            "blocked_threads": [
+                {"thread": t["name"] or t["handle"], "handle": t["handle"],
+                 "wait": t["wait"], "obj": t["obj"], "parked": t["parked"],
+                 "rip": t["rip"]}
+                for t in self.blocked_threads()
+            ],
+            "edges": self.edges(),
+            "cycles": self.cycles(),
+        }
+
+
+def render_snapshot(s: SyncSnapshot) -> str:
+    d = s.to_dict()
+    L = ["=" * 72, "WAIT-FOR GRAPH (authoritative live sync snapshot)", "=" * 72]
+    L.append(f"reason: {d['reason']}")
+    L.append("")
+    L.append("Blocked threads (identity recovered, incl. former host-parked guest=0):")
+    for t in d["blocked_threads"]:
+        L.append(f"  {str(t['thread']):<28} waits {t['wait']} on {t['obj']} "
+                 f"(rip {t['rip']}, parked={t['parked']})")
+    L.append("")
+    L.append("Wait-for edges:")
+    for e in d["edges"]:
+        prov = e["provider"] if e["provider"] is not None else "external-event"
+        L.append(f"  {e['thread']} -> {e['wait']}:{e['obj']} "
+                 f"{e['obj_name'] or ''} (unblocked by: {prov})")
+    L.append("")
+    if d["cycles"]:
+        L.append("*** DEADLOCK CYCLES DETECTED ***")
+        for c in d["cycles"]:
+            L.append("  " + " -> ".join(str(x) for x in c) + " -> (back to start)")
+    else:
+        L.append("No resolvable dependency cycle in this snapshot.")
+    return "\n".join(L)
+
+
+def _log_has_snapshot(path: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "sync_snapshot.begin" in line:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def run(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Reconstruct a wait-for graph / detect deadlock from a run log.")
     p.add_argument("log")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--mode", choices=["auto", "snapshot", "historical"], default="auto",
+                   help="auto: use a live snapshot if present, else historical reconstruction")
     args = p.parse_args(argv)
-    g = WaitForGraph()
+
+    use_snapshot = args.mode == "snapshot" or (
+        args.mode == "auto" and _log_has_snapshot(args.log))
+
     try:
-        g.feed_file(args.log)
+        if use_snapshot:
+            s = SyncSnapshot()
+            s.feed_file(args.log)
+            print(json.dumps(s.to_dict(), indent=2) if args.json else render_snapshot(s))
+        else:
+            g = WaitForGraph()
+            g.feed_file(args.log)
+            print(json.dumps(g.to_dict(), indent=2) if args.json else render_text(g))
     except OSError as exc:
         print(f"error: cannot read {args.log}: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(g.to_dict(), indent=2) if args.json else render_text(g))
     return 0
 
 

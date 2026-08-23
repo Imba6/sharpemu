@@ -96,5 +96,101 @@ class CrossWaitTest(unittest.TestCase):
         self.assertIn("cross-wait", out.lower())
 
 
+# A live snapshot resolving the 0x86/0x84 cycle with real identities, including
+# the former anonymous host-parked guest=0 waiter (now Background Job.Worker 0).
+SNAPSHOT = """
+[LOADER][DIAG] sync_snapshot.begin reason=stall stall_ms=2000 seq=1
+[LOADER][DIAG] sync_snapshot.thread handle=0xAA pthread=0x100 name='Loading.PreloadManager' state=Blocked rip=0x800D17CFB resume_rip=0x0 host_tid=7 worker=inline wait=sema obj=0x84 key='k84' need=1 timeout=infinite parked=1 reentrant=0 wait_ms=6200
+[LOADER][DIAG] sync_snapshot.thread handle=0xBB pthread=0x200 name='Background Job.Worker 0' state=Blocked rip=0x800D18129 resume_rip=0x0 host_tid=9 worker=inline wait=sema obj=0x86 key='k86' need=1 timeout=1000 parked=1 reentrant=0 wait_ms=6100
+[LOADER][DIAG] sync_snapshot.sema handle=0x86 name='Baselib_SystemSemaphore' count=0 max=2147483647 waiters=1 last_signaler=0xAA last_signaler_name='Loading.PreloadManager'
+[LOADER][DIAG] sync_snapshot.sema handle=0x84 name='Baselib_SystemSemaphore' count=0 max=2147483647 waiters=1 last_signaler=0xBB last_signaler_name='Background Job.Worker 0'
+[LOADER][DIAG] sync_snapshot.end seq=1 threads=2 blocked=2
+"""
+
+# A mutex-cycle snapshot: A holds M1 (0x1001) waits M2 (0x1002); B holds M2 waits M1.
+MUTEX_SNAPSHOT = """
+[LOADER][DIAG] sync_snapshot.begin reason=manual seq=1
+[LOADER][DIAG] sync_snapshot.thread handle=0xA1 name='ThreadA' state=Blocked rip=0x1 wait=mutex obj=0x1002 need=1 timeout=infinite parked=0 reentrant=0 wait_ms=10
+[LOADER][DIAG] sync_snapshot.thread handle=0xB2 name='ThreadB' state=Blocked rip=0x2 wait=mutex obj=0x1001 need=1 timeout=infinite parked=0 reentrant=0 wait_ms=10
+[LOADER][DIAG] sync_snapshot.mutex obj=0x1001 name='m1' owner=0xA1 owner_name='ThreadA' recursion=1 waiters=1 abandoned=0
+[LOADER][DIAG] sync_snapshot.mutex obj=0x1002 name='m2' owner=0xB2 owner_name='ThreadB' recursion=1 waiters=1 abandoned=0
+[LOADER][DIAG] sync_snapshot.end seq=1 threads=2 blocked=2
+"""
+
+# Anonymous provider: the peer that would signal 0x86 was not recoverable.
+UNKNOWN_SNAPSHOT = """
+[LOADER][DIAG] sync_snapshot.begin reason=manual seq=1
+[LOADER][DIAG] sync_snapshot.thread handle=0xCC name='Consumer' state=Blocked rip=0x9 wait=sema obj=0x86 need=1 timeout=1000 parked=1 reentrant=0 wait_ms=99
+[LOADER][DIAG] sync_snapshot.sema handle=0x86 name='Baselib' count=0 max=99 waiters=1 last_signaler=UNKNOWN last_signaler_name=UNKNOWN
+[LOADER][DIAG] sync_snapshot.equeue handle=0x200 name='eq' events=0 waiters=1
+[LOADER][DIAG] sync_snapshot.end seq=1 threads=1 blocked=1
+"""
+
+
+class LiveSnapshotTest(unittest.TestCase):
+    def _parse(self, text):
+        s = wf.SyncSnapshot()
+        for line in text.strip("\n").splitlines():
+            s.feed_line(line)
+        return s
+
+    def test_reason_parsed_cleanly(self):
+        s = self._parse(SNAPSHOT)
+        self.assertEqual(s.reason, "stall")
+
+    def test_host_parked_identity_recovered(self):
+        s = self._parse(SNAPSHOT)
+        blocked = {t["name"] for t in s.blocked_threads()}
+        self.assertIn("Background Job.Worker 0", blocked)
+        self.assertIn("Loading.PreloadManager", blocked)
+
+    def test_sema_cycle_detected_with_identities(self):
+        s = self._parse(SNAPSHOT)
+        cycles = s.cycles()
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(set(cycles[0]),
+                         {"Loading.PreloadManager", "Background Job.Worker 0"})
+
+    def test_edges_resolve_provider(self):
+        s = self._parse(SNAPSHOT)
+        edges = {e["thread"]: e for e in s.edges()}
+        self.assertEqual(edges["Loading.PreloadManager"]["provider"],
+                         "Background Job.Worker 0")
+        self.assertEqual(edges["Background Job.Worker 0"]["provider"],
+                         "Loading.PreloadManager")
+
+    def test_mutex_owner_cycle(self):
+        s = self._parse(MUTEX_SNAPSHOT)
+        cycles = s.cycles()
+        self.assertEqual(len(cycles), 1)
+        self.assertEqual(set(cycles[0]), {"ThreadA", "ThreadB"})
+
+    def test_unknown_identity_is_preserved_not_guessed(self):
+        s = self._parse(UNKNOWN_SNAPSHOT)
+        edge = s.edges()[0]
+        self.assertEqual(edge["provider"], "UNKNOWN")
+        # No cycle can be fabricated from an unknown provider.
+        self.assertEqual(s.cycles(), [])
+
+    def test_equeue_provider_is_external_not_cycle(self):
+        s = self._parse(UNKNOWN_SNAPSHOT)
+        # equeue has no provider mapping -> external event source.
+        objs = {o["id"]: o for o in s.to_dict()["objects"]}
+        self.assertIn("0x200", objs)
+        self.assertEqual(objs["0x200"]["kind"], "equeue")
+
+    def test_last_block_wins(self):
+        # Two blocks; the second (empty) must replace the first.
+        two = SNAPSHOT + "\n[LOADER][DIAG] sync_snapshot.begin reason=manual seq=2\n[LOADER][DIAG] sync_snapshot.end seq=2 threads=0 blocked=0\n"
+        s = self._parse(two)
+        self.assertEqual(s.threads, [])
+
+    def test_render_smoke(self):
+        s = self._parse(SNAPSHOT)
+        out = wf.render_snapshot(s)
+        self.assertIn("DEADLOCK CYCLES DETECTED", out)
+        self.assertIn("Background Job.Worker 0", out)
+
+
 if __name__ == "__main__":
     unittest.main()
