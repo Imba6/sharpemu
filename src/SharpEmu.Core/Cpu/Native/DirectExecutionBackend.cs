@@ -6962,6 +6962,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Console.Error.WriteLine("[LOADER][INFO] Calling guest entry...");
 			StartStallWatchdog();
 			StartSyncStallSnapshotWatchdog();
+			LogGuestRipWatchArmed();
 			StartReadyThreadDispatcher();
 			int num6 = -1;
 			try

@@ -42,6 +42,22 @@ public sealed unsafe partial class DirectExecutionBackend
             : 256;
     }
 
+    // One-shot startup confirmation so a capture is self-verifying: if this line
+    // is absent while the env var was set, the running binary predates the watch.
+    private void LogGuestRipWatchArmed()
+    {
+        if (_diagGuestRipWatch == 0)
+        {
+            return;
+        }
+
+        var ops = string.Join(",", System.Linq.Enumerable.Select(_diagGuestRipWatchOperands,
+            o => $"{o.Reg}{(o.Disp >= 0 ? "+" : "-")}0x{Math.Abs(o.Disp):X}:{o.Size}"));
+        Console.Error.WriteLine(
+            $"[LOADER][DIAG] guest_rip_watch armed rip=0x{_diagGuestRipWatch:X} " +
+            $"limit={_diagGuestRipWatchLimit} operands=[{ops}]");
+    }
+
     private void MaybeEmitGuestRipWatch(CpuContext ctx, ulong returnRip, string nid)
     {
         if (_diagGuestRipWatch == 0 || returnRip != _diagGuestRipWatch)
