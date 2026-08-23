@@ -385,7 +385,13 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] bootstrap_call#{num}: op=0x{value:X16} sym_ptr=0x{value2:X16} sym='{symbolText}' out_ptr=0x{num3:X16} ret=0x{num7:X16}");
 		}
-		if (!isGuestWorker &&
+		// The import-loop guard normally fires only for the inline primary
+		// (!isGuestWorker). A V2 cooperative primary (stage 5C) is a guest thread, so
+		// it would lose the guard; keep it for that thread explicitly. When the 5C
+		// gate is off no thread is a cooperative primary, so this is unchanged.
+		var guardEligible = !isGuestWorker ||
+			(_activeGuestThreadState?.IsCooperativePrimary ?? false);
+		if (guardEligible &&
 			!ActiveForcedGuestExit &&
 			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2))
 		{

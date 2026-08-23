@@ -192,6 +192,16 @@ public sealed partial class DirectExecutionBackend
 	// copied back into this thread's statics before returning.
 	private unsafe int RunGuestEntryStub(void* entryStub, ulong hostRspSlot, bool requireNativeWorker = false)
 	{
+		// V2 stage 5C: a thread that pins its own persistent NativeGuestExecutor
+		// (the cooperative primary) runs on it directly -- no pool Rent/Return, no
+		// cross-worker handoff -- so its hot per-frame block/resume is a same-worker
+		// continuation. The pinned executor lives outside the pool's run-slot budget,
+		// so it never permanently consumes an ordinary-pthread slot.
+		if (_activeGuestThreadState?.PinnedNativeExecutor is { } pinned)
+		{
+			return InvokeNativeGuestExecutor(pinned, entryStub, hostRspSlot);
+		}
+
 		// Rent a worker from the grow-on-demand pool. The pool's run-slot semaphore
 		// bounds concurrent runs (= peak OS worker threads) at NativeWorkerMax and
 		// makes an over-cap caller BLOCK for a slot rather than storm-create threads
@@ -239,27 +249,36 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 
-			var nativeReturn = worker.Run(
-				_activeCpuContext!,
-				state,
-				GuestThreadExecution.CurrentGuestThreadHandle,
-				_activeEntryReturnSentinelRip,
-				_activeGuestReturnSlotAddress,
-				(nint)hostRspSlot,
-				(nint)entryStub,
-				state?.AffinityMask ?? 0,
-				out var yieldRequested,
-				out var yieldReason,
-				out var forcedExit);
-			_activeGuestThreadYieldRequested = yieldRequested;
-			_activeGuestThreadYieldReason = yieldReason;
-			_activeForcedGuestExit = forcedExit;
-			return nativeReturn;
+			return InvokeNativeGuestExecutor(worker, entryStub, hostRspSlot);
 		}
 		finally
 		{
 			pool!.Return(worker);
 		}
+	}
+
+	// Dispatches one guest entry-stub slice onto a NativeGuestExecutor (pooled or
+	// pinned) and copies the worker outcome back into this (runner) thread's
+	// Active* statics, exactly as the callers downstream read them.
+	private unsafe int InvokeNativeGuestExecutor(NativeGuestExecutor worker, void* entryStub, ulong hostRspSlot)
+	{
+		var state = _activeGuestThreadState;
+		var nativeReturn = worker.Run(
+			_activeCpuContext!,
+			state,
+			GuestThreadExecution.CurrentGuestThreadHandle,
+			_activeEntryReturnSentinelRip,
+			_activeGuestReturnSlotAddress,
+			(nint)hostRspSlot,
+			(nint)entryStub,
+			state?.AffinityMask ?? 0,
+			out var yieldRequested,
+			out var yieldReason,
+			out var forcedExit);
+		_activeGuestThreadYieldRequested = yieldRequested;
+		_activeGuestThreadYieldReason = yieldReason;
+		_activeForcedGuestExit = forcedExit;
+		return nativeReturn;
 	}
 
 	private static int _tbbNativeRunEnterCount;

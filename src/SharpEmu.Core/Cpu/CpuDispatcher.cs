@@ -294,6 +294,11 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         // initializer, so it routes the DT_INIT onto a GC-safe native worker.
         (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveEntryIsModuleInitializer(
             frameKind == EntryFrameKind.ModuleInitializer);
+        // V2 stage 5C (gated): the cooperative-primary path gates on the real
+        // process entry; the debug frame is null without a debugger, so tell the
+        // backend the entry kind directly.
+        (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveEntryIsProcessEntry(
+            frameKind == EntryFrameKind.ProcessEntry);
         if (_nativeCpuBackend.TryExecute(
                 context,
                 entryPoint,

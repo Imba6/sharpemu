@@ -484,6 +484,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public bool IsExternalExecutor { get; init; }
 
+		// V2 stage 5C: the cooperative primary is a guest thread, which would
+		// otherwise disable the import-loop force-exit guard for it (the guard fires
+		// only for non-guest-workers). Keep the guard active for the primary via
+		// this marker so a spinning primary (e.g. a libunwind NOT_FOUND loop) still
+		// force-exits instead of running unbounded until the stall watchdog.
+		public bool IsCooperativePrimary { get; init; }
+
 		public ulong StackBase { get; init; }
 
 		public ulong StackSize { get; init; }
@@ -548,6 +555,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public GuestContinuationRunner? ContinuationRunner { get; set; }
 
 		public GuestExecutionRunner? ExecutionRunner { get; set; }
+
+		// V2 stage 5C: the cooperative primary owns a single persistent
+		// NativeGuestExecutor for the whole session. When set, RunGuestEntryStub
+		// runs this thread's slices on it directly instead of renting/returning a
+		// pooled worker per block -- so the primary's hot per-frame Baselib
+		// semaphore block/resume pays no pool rent or handoff.
+		public NativeGuestExecutor? PinnedNativeExecutor { get; set; }
 	}
 
 	private sealed class ExternalGuestThreadState
@@ -1152,6 +1166,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	internal void SetActiveEntryIsModuleInitializer(bool value) =>
 		_activeEntryIsModuleInitializer = value;
+
+	// V2 stage 5C: true while the entry about to run is the real process entry (not
+	// a module initializer, which also flows through ExecuteEntry). The debug frame
+	// is null when no debugger is attached, so the cooperative-primary gate reads
+	// this dispatcher-set flag instead of _activeDebugFrame.Kind.
+	private bool _activeEntryIsProcessEntry;
+
+	internal void SetActiveEntryIsProcessEntry(bool isProcessEntry) =>
+		_activeEntryIsProcessEntry = isProcessEntry;
 
 	/// <summary>
 	/// Notifies an attached debugger of a detected execution stall. No-op when no
@@ -6784,6 +6807,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool ExecuteEntry(CpuContext context, ulong entryPoint, out OrbisGen2Result result)
 	{
+		// V2 stage 5C (gated, default off; requires V2): when enabled, the true
+		// process entry runs as a cooperative GuestThreadState pinned to its own
+		// persistent native worker, instead of inline on the CLR main thread. This
+		// delivers the Boehm 0x1E GC-suspend through the GC-safe cooperative path
+		// (no host-park nested delivery -- the UnmanagedCallersOnly __fastfail root
+		// cause) while avoiding the per-block pooled-worker churn that stalled the
+		// plain-cooperative primary. Module initializers also flow through
+		// ExecuteEntry, so gate to the real process entry.
+		if (NativeGuestV2PrimaryEnabled && _activeEntryIsProcessEntry)
+		{
+			return ExecuteEntryCooperativePrimary(context, entryPoint, out result);
+		}
+
 		Console.Error.WriteLine($"[LOADER][INFO] ExecuteEntry starting at 0x{entryPoint:X16}");
 		Console.Error.WriteLine($"[LOADER][INFO] RSP=0x{context[CpuRegister.Rsp]:X16}, RDI=0x{context[CpuRegister.Rdi]:X16}");
 		ulong num = context[CpuRegister.Rsp];
