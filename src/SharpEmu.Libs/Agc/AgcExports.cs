@@ -1776,29 +1776,36 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!RelocatePointerField(ctx, headerAddress + ShaderCxRegistersOffset) ||
-            !RelocatePointerField(ctx, headerAddress + ShaderShRegistersOffset) ||
-            !RelocatePointerField(ctx, headerAddress + ShaderUserDataOffset) ||
-            !RelocatePointerField(ctx, headerAddress + ShaderSpecialsOffset) ||
-            !RelocatePointerField(ctx, headerAddress + ShaderInputSemanticsOffset) ||
-            !RelocatePointerField(ctx, headerAddress + ShaderOutputSemanticsOffset) ||
+        // Each header pointer field is relocated individually (rather than in a
+        // short-circuit || chain) so a MEMORY_FAULT names the exact failing field
+        // under SHARPEMU_LOG_AGC_SHADER. Semantics are unchanged: any failure
+        // still returns MEMORY_FAULT.
+        if (!RelocatePointerField(ctx, headerAddress + ShaderCxRegistersOffset, "cx@0x18") ||
+            !RelocatePointerField(ctx, headerAddress + ShaderShRegistersOffset, "sh@0x20") ||
+            !RelocatePointerField(ctx, headerAddress + ShaderUserDataOffset, "userdata@0x08") ||
+            !RelocatePointerField(ctx, headerAddress + ShaderSpecialsOffset, "specials@0x28") ||
+            !RelocatePointerField(ctx, headerAddress + ShaderInputSemanticsOffset, "in_sem@0x30") ||
+            !RelocatePointerField(ctx, headerAddress + ShaderOutputSemanticsOffset, "out_sem@0x38") ||
             !ctx.TryWriteUInt64(headerAddress + ShaderCodeOffset, codeAddress))
         {
+            TraceAgcShader($"agc.create_shader.memory_fault phase=header-reloc header=0x{headerAddress:X16} code=0x{codeAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!TryReadUInt64(ctx, headerAddress + ShaderUserDataOffset, out var userDataAddress))
         {
+            TraceAgcShader($"agc.create_shader.memory_fault phase=userdata-read header=0x{headerAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (userDataAddress != 0 &&
-            (!RelocatePointerField(ctx, userDataAddress) ||
-             !RelocatePointerField(ctx, userDataAddress + 0x08) ||
-             !RelocatePointerField(ctx, userDataAddress + 0x10) ||
-             !RelocatePointerField(ctx, userDataAddress + 0x18) ||
-             !RelocatePointerField(ctx, userDataAddress + 0x20)))
+            (!RelocatePointerField(ctx, userDataAddress, "userdata_sub@0x00") ||
+             !RelocatePointerField(ctx, userDataAddress + 0x08, "userdata_sub@0x08") ||
+             !RelocatePointerField(ctx, userDataAddress + 0x10, "userdata_sub@0x10") ||
+             !RelocatePointerField(ctx, userDataAddress + 0x18, "userdata_sub@0x18") ||
+             !RelocatePointerField(ctx, userDataAddress + 0x20, "userdata_sub@0x20")))
         {
+            TraceAgcShader($"agc.create_shader.memory_fault phase=userdata-sub-reloc userdata=0x{userDataAddress:X16} header=0x{headerAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
@@ -14964,10 +14971,11 @@ public static partial class AgcExports
         return ctx.Memory.TryWrite(address, buffer);
     }
 
-    private static bool RelocatePointerField(CpuContext ctx, ulong fieldAddress)
+    private static bool RelocatePointerField(CpuContext ctx, ulong fieldAddress, string label = "?")
     {
         if (!TryReadUInt64(ctx, fieldAddress, out var relativeAddress))
         {
+            TraceAgcShader($"agc.create_shader.reloc_fail stage=read field={label} addr=0x{fieldAddress:X16}");
             return false;
         }
 
@@ -14976,7 +14984,15 @@ public static partial class AgcExports
             return true;
         }
 
-        return ctx.TryWriteUInt64(fieldAddress, fieldAddress + relativeAddress);
+        if (!ctx.TryWriteUInt64(fieldAddress, fieldAddress + relativeAddress))
+        {
+            TraceAgcShader(
+                $"agc.create_shader.reloc_fail stage=write field={label} addr=0x{fieldAddress:X16} " +
+                $"delta=0x{relativeAddress:X16} target=0x{(fieldAddress + relativeAddress):X16}");
+            return false;
+        }
+
+        return true;
     }
 
     private static int ReturnRegisterDefaults(CpuContext ctx, bool internalDefaults)
