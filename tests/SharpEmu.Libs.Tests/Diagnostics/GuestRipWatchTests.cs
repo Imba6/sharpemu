@@ -75,6 +75,35 @@ public sealed class GuestRipWatchTests
     }
 
     [Fact]
+    public void ParseOperands_IndirectPointerChase()
+    {
+        // read ptr at [rbp-0x18] (the work item on the stack), then read the
+        // node's fields at ptr+0x0 / ptr+0x8 / ptr+0x10.
+        var ops = GuestRipWatch.ParseOperands("[rbp-0x18]+0x0:8,[rbp-0x18]+0x8:8,[rbp-0x18]+0x10:4");
+        Assert.Equal(3, ops.Count);
+        Assert.Equal(new RipWatchOperand("rbp", -0x18, 8, Indirect: true, Disp2: 0x0), ops[0]);
+        Assert.Equal(new RipWatchOperand("rbp", -0x18, 8, Indirect: true, Disp2: 0x8), ops[1]);
+        Assert.Equal(new RipWatchOperand("rbp", -0x18, 4, Indirect: true, Disp2: 0x10), ops[2]);
+    }
+
+    [Fact]
+    public void ParseOperands_IndirectDefaultsAndBadRegSkipped()
+    {
+        var ops = GuestRipWatch.ParseOperands("[r13],[notareg-0x8]+0x4:4,[r14+0x120]:8");
+        Assert.Equal(2, ops.Count);
+        Assert.Equal(new RipWatchOperand("r13", 0, 8, Indirect: true, Disp2: 0), ops[0]);
+        Assert.Equal(new RipWatchOperand("r14", 0x120, 8, Indirect: true, Disp2: 0), ops[1]);
+    }
+
+    [Fact]
+    public void ParseOperands_DirectStillWorksAlongsideIndirect()
+    {
+        var ops = GuestRipWatch.ParseOperands("r13+0x118:4,[rbp-0x18]+0x8:8");
+        Assert.False(ops[0].Indirect);
+        Assert.True(ops[1].Indirect);
+    }
+
+    [Fact]
     public void ParseOperands_EmptyOrNull()
     {
         Assert.Empty(GuestRipWatch.ParseOperands(null));

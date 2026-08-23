@@ -98,24 +98,31 @@ public sealed unsafe partial class DirectExecutionBackend
             foreach (var op in _diagGuestRipWatchOperands)
             {
                 ulong baseVal = ReadNamedRegister(ctx, op.Reg);
-                ulong ea = unchecked(baseVal + (ulong)op.Disp);
-                sb.Append(" [").Append(op.Reg);
-                if (op.Disp >= 0)
+                ulong baseEa = unchecked(baseVal + (ulong)op.Disp);
+                sb.Append(op.Indirect ? " [[" : " [").Append(op.Reg);
+                AppendDisp(sb, op.Disp);
+                if (op.Indirect)
                 {
-                    sb.Append('+').Append("0x").Append(op.Disp.ToString("X", CultureInfo.InvariantCulture));
+                    // Chase one pointer: read ptr at baseEa, then read at ptr+Disp2.
+                    sb.Append(']');
+                    AppendDisp(sb, op.Disp2);
+                    sb.Append(':').Append(op.Size).Append("]");
+                    if (!TryReadGuestOperand(ctx, baseEa, 8, out var ptr))
+                    {
+                        sb.Append("ptr@0x").Append(baseEa.ToString("X", CultureInfo.InvariantCulture)).Append("=<unreadable>");
+                        continue;
+                    }
+                    ulong ea = unchecked(ptr + (ulong)op.Disp2);
+                    sb.Append("ptr=0x").Append(ptr.ToString("X", CultureInfo.InvariantCulture))
+                      .Append(" ea=0x").Append(ea.ToString("X", CultureInfo.InvariantCulture));
+                    sb.Append(TryReadGuestOperand(ctx, ea, op.Size, out var iv)
+                        ? "=0x" + iv.ToString("X", CultureInfo.InvariantCulture) : "=<unreadable>");
                 }
                 else
                 {
-                    sb.Append("-0x").Append((-op.Disp).ToString("X", CultureInfo.InvariantCulture));
-                }
-                sb.Append(':').Append(op.Size).Append("]ea=0x").Append(ea.ToString("X", CultureInfo.InvariantCulture));
-                if (TryReadGuestOperand(ctx, ea, op.Size, out var value))
-                {
-                    sb.Append("=0x").Append(value.ToString("X", CultureInfo.InvariantCulture));
-                }
-                else
-                {
-                    sb.Append("=<unreadable>");
+                    sb.Append(':').Append(op.Size).Append("]ea=0x").Append(baseEa.ToString("X", CultureInfo.InvariantCulture));
+                    sb.Append(TryReadGuestOperand(ctx, baseEa, op.Size, out var value)
+                        ? "=0x" + value.ToString("X", CultureInfo.InvariantCulture) : "=<unreadable>");
                 }
             }
 
@@ -125,6 +132,18 @@ public sealed unsafe partial class DirectExecutionBackend
         {
             // Diagnostics must never disturb guest execution.
             Console.Error.WriteLine($"[LOADER][DIAG] guest_rip_watch.error {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void AppendDisp(StringBuilder sb, long disp)
+    {
+        if (disp >= 0)
+        {
+            sb.Append("+0x").Append(disp.ToString("X", CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            sb.Append("-0x").Append((-disp).ToString("X", CultureInfo.InvariantCulture));
         }
     }
 

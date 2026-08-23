@@ -18,8 +18,13 @@ namespace SharpEmu.HLE.Diagnostics;
 //
 // No title-specific knowledge; the RIP and operands are entirely configuration.
 
-/// <summary>One parsed memory operand to sample: value_at([Reg]+Disp), Size bytes.</summary>
-public readonly record struct RipWatchOperand(string Reg, long Disp, int Size);
+/// <summary>
+/// One parsed memory operand to sample. Direct: value_at([Reg]+Disp), Size bytes.
+/// Indirect ("[reg+disp]+disp2:size"): first read an 8-byte pointer at Reg+Disp,
+/// then read Size bytes at pointer+Disp2 — for chasing one pointer (e.g. a work
+/// item held on the stack at [rbp-0x18]) to its fields.
+/// </summary>
+public readonly record struct RipWatchOperand(string Reg, long Disp, int Size, bool Indirect = false, long Disp2 = 0);
 
 public static class GuestRipWatch
 {
@@ -41,7 +46,7 @@ public static class GuestRipWatch
         {
             var item = rawItem;
             int size = 8;
-            int colon = item.IndexOf(':');
+            int colon = item.LastIndexOf(':');
             if (colon >= 0)
             {
                 var sizePart = item[(colon + 1)..].Trim();
@@ -52,29 +57,67 @@ public static class GuestRipWatch
                 }
             }
 
-            long disp = 0;
-            string reg = item.Trim();
-            int sign = item.IndexOfAny(new[] { '+', '-' });
-            if (sign > 0)
+            // Indirect form: "[reg+disp]+disp2"
+            if (item.StartsWith('['))
             {
-                reg = item[..sign].Trim();
-                var dispPart = item[sign..].Trim();
-                var negative = dispPart[0] == '-';
-                var digits = dispPart[1..].Trim();
-                if (TryParseIntLiteral(digits, out var d))
+                int close = item.IndexOf(']');
+                if (close < 0)
                 {
-                    disp = negative ? -(long)d : (long)d;
+                    continue;
                 }
+                var inner = item[1..close].Trim();
+                var outer = item[(close + 1)..].Trim();
+                if (TryParseRegDisp(inner, out var breg, out var bdisp) && IsGpr(breg))
+                {
+                    long disp2 = 0;
+                    if (outer.Length > 0)
+                    {
+                        _ = TryParseSignedDisp(outer, out disp2);
+                    }
+                    result.Add(new RipWatchOperand(breg, bdisp, size, Indirect: true, Disp2: disp2));
+                }
+                continue;
             }
 
-            reg = reg.ToLowerInvariant();
-            if (IsGpr(reg))
+            if (TryParseRegDisp(item.Trim(), out var reg, out var disp) && IsGpr(reg))
             {
                 result.Add(new RipWatchOperand(reg, disp, size));
             }
         }
 
         return result;
+    }
+
+    private static bool TryParseRegDisp(string s, out string reg, out long disp)
+    {
+        disp = 0;
+        reg = s.Trim();
+        int sign = s.IndexOfAny(new[] { '+', '-' });
+        if (sign > 0)
+        {
+            reg = s[..sign].Trim();
+            _ = TryParseSignedDisp(s[sign..].Trim(), out disp);
+        }
+        reg = reg.ToLowerInvariant();
+        return reg.Length > 0;
+    }
+
+    private static bool TryParseSignedDisp(string s, out long disp)
+    {
+        disp = 0;
+        s = s.Trim();
+        if (s.Length == 0)
+        {
+            return false;
+        }
+        bool negative = s[0] == '-';
+        var digits = (s[0] is '+' or '-') ? s[1..].Trim() : s;
+        if (TryParseIntLiteral(digits, out var d))
+        {
+            disp = negative ? -(long)d : (long)d;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>Parse a RIP literal ("0x..." or decimal). Returns 0 (disabled) on failure.</summary>
