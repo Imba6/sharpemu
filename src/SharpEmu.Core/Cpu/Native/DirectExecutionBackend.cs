@@ -37,6 +37,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	private const int ImportLoopMinPatternHits = 6;
+
+	// When at least this many imports were dispatched by OTHER threads during a
+	// suspicion window, the VM as a whole is making forward progress and a single
+	// hot import loop (e.g. a polite scePthreadYield spin while other threads run)
+	// must not be treated as a hang. Keeps the guard from falsely killing a
+	// legitimate spin. Generic; no per-title or per-NID special casing.
+	private const int ImportLoopOtherThreadProgressThreshold = 64;
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -284,6 +293,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	[ThreadStatic]
 	private static long _importDispatchBlockEnd;
 
+	// Per-thread count of import dispatches, used by the import-loop guard to
+	// distinguish "this thread is spinning" from "the whole VM is wedged".
+	[ThreadStatic]
+	private static long _threadImportDispatchCount;
+
 	private ImportStubEntry[] _importEntries = Array.Empty<ImportStubEntry>();
 
 	private readonly List<nint> _importHandlerTrampolines = new List<nint>();
@@ -421,6 +435,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private int _importLoopPatternHits;
 
 	private long _importLoopPatternStartTimestamp;
+
+	// Global/this-thread dispatch counts sampled when a suspicion window opens.
+	// The delta between (global growth) and (this-thread growth) over the window
+	// is other-thread progress, which vetoes/restarts the guard.
+	private long _importLoopStartGlobalDispatch;
+
+	private long _importLoopStartThreadDispatch;
+
+	// The specific import-loop-guard termination reason, preserved across the
+	// nested-scope LastError save/restore so the real cause survives the forced
+	// unwind instead of degrading to "unknown backend error".
+	private volatile string? _forcedGuestExitReason;
 
 
 	private enum GuestThreadRunState
@@ -6980,8 +7006,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
 				if (string.IsNullOrEmpty(LastError))
 				{
-					LastError = "Detected repeating import loop and forced guest unwind to host.";
+					LastError = _forcedGuestExitReason ?? "Detected repeating import loop and forced guest unwind to host.";
 				}
+				_forcedGuestExitReason = null;
 				Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
 				return false;
 			}
@@ -6989,10 +7016,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				result = OrbisGen2Result.ORBIS_GEN2_OK;
 				LastError = null;
+				_forcedGuestExitReason = null;
 				return true;
 			}
 			result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
-			if (string.IsNullOrEmpty(LastError))
+			// The guard may have fired on a rented native worker, where the
+			// ThreadStatic ActiveForcedGuestExit flag is not observable on this
+			// (entry) thread. The preserved instance reason still survives, so
+			// prefer it over the generic non-zero message.
+			if (string.IsNullOrEmpty(LastError) && _forcedGuestExitReason is not null)
+			{
+				LastError = _forcedGuestExitReason;
+				_forcedGuestExitReason = null;
+			}
+			else if (string.IsNullOrEmpty(LastError))
 			{
 				LastError = $"Guest entry point returned non-zero: {num6}";
 			}

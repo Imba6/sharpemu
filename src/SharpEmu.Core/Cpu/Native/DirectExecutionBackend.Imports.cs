@@ -1745,6 +1745,7 @@ public sealed partial class DirectExecutionBackend
 			_importDispatchBlockEnd = blockEnd + 1;
 		}
 
+		_threadImportDispatchCount++;
 		return _nextImportDispatchIndex++;
 	}
 
@@ -1789,7 +1790,8 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 		ActiveForcedGuestExit = true;
-		LastError = $"Detected repeating import loop at import#{dispatchIndex} ({nid}) and forced guest exit.";
+		_forcedGuestExitReason = $"Detected repeating import loop at import#{dispatchIndex} ({nid}) and forced guest exit.";
+		LastError = _forcedGuestExitReason;
 		Console.Error.WriteLine($"[LOADER][ERROR] Import-loop guard fired at import#{dispatchIndex}: nid={nid} ret=0x{returnRip:X16} -> host_exit=0x{num:X16}");
 		DumpRecentImportTrace();
 		return true;
@@ -1889,15 +1891,70 @@ public sealed partial class DirectExecutionBackend
 		if (_importLoopPatternStartTimestamp == 0)
 		{
 			_importLoopPatternStartTimestamp = Stopwatch.GetTimestamp();
+			_importLoopStartGlobalDispatch = Volatile.Read(ref _importDispatchCount);
+			_importLoopStartThreadDispatch = _threadImportDispatchCount;
 		}
 		_importLoopPatternHits++;
-		if (_importLoopPatternHits < 6)
+
+		var elapsedTicks = Stopwatch.GetTimestamp() - _importLoopPatternStartTimestamp;
+		var guardTicks = (long)(_importLoopGuardSeconds * Stopwatch.Frequency);
+
+		// Other-thread progress over the window: total dispatches minus this
+		// thread's own. A repeating import loop on one thread is only a hang if
+		// nothing else in the VM advanced.
+		var globalDelta = Volatile.Read(ref _importDispatchCount) - _importLoopStartGlobalDispatch;
+		var threadDelta = _threadImportDispatchCount - _importLoopStartThreadDispatch;
+		var otherThreadDispatchDelta = globalDelta - threadDelta;
+
+		var shouldFire = ShouldFireImportLoopGuard(
+			_importLoopPatternHits,
+			ImportLoopMinPatternHits,
+			elapsedTicks,
+			guardTicks,
+			otherThreadDispatchDelta,
+			ImportLoopOtherThreadProgressThreshold,
+			out var restartWindow);
+
+		if (restartWindow)
+		{
+			// Real global progress observed; restart the suspicion window so the
+			// guard measures time since the last whole-VM progress, not since the
+			// spin first appeared. This is what makes a spin-that-follows-progress
+			// still fire if the VM later truly wedges.
+			_importLoopPatternStartTimestamp = Stopwatch.GetTimestamp();
+			_importLoopStartGlobalDispatch = Volatile.Read(ref _importDispatchCount);
+			_importLoopStartThreadDispatch = _threadImportDispatchCount;
+		}
+
+		return shouldFire;
+	}
+
+	// Pure, side-effect-free import-loop-guard decision. Extracted so the policy
+	// is unit-testable without the backend. The guard fires only when the pattern
+	// has repeated enough (patternHits), the whole VM has made no meaningful
+	// forward progress during the window (otherThreadDispatchDelta small), and the
+	// spin has persisted for at least guardTicks. When other threads DID progress,
+	// restartWindow is set so the caller re-opens the window instead of firing.
+	internal static bool ShouldFireImportLoopGuard(
+		int patternHits,
+		int minPatternHits,
+		long elapsedTicks,
+		long guardTicks,
+		long otherThreadDispatchDelta,
+		long otherThreadProgressThreshold,
+		out bool restartWindow)
+	{
+		restartWindow = false;
+		if (patternHits < minPatternHits)
 		{
 			return false;
 		}
-
-		var elapsedTicks = Stopwatch.GetTimestamp() - _importLoopPatternStartTimestamp;
-		return elapsedTicks >= (long)(_importLoopGuardSeconds * Stopwatch.Frequency);
+		if (otherThreadDispatchDelta > otherThreadProgressThreshold)
+		{
+			restartWindow = true;
+			return false;
+		}
+		return elapsedTicks >= guardTicks;
 	}
 
 	private static bool IsImportLoopGuardBoundary(string nid) =>
@@ -1913,6 +1970,8 @@ public sealed partial class DirectExecutionBackend
 	{
 		_importLoopPatternHits = 0;
 		_importLoopPatternStartTimestamp = 0;
+		_importLoopStartGlobalDispatch = 0;
+		_importLoopStartThreadDispatch = 0;
 		_importLoopSignatureCount = 0;
 		_importLoopSignatureWriteIndex = 0;
 	}
