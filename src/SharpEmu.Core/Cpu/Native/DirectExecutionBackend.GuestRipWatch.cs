@@ -24,8 +24,12 @@ namespace SharpEmu.Core.Cpu.Native;
 // only; never throws into guest execution. No title-specific values are baked in.
 public sealed unsafe partial class DirectExecutionBackend
 {
-    private static readonly ulong _diagGuestRipWatch =
-        GuestRipWatch.ParseRip(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_GUEST_RIP_WATCH"));
+    // Accepts one RIP or a comma-separated set (e.g. producer signal + consumer
+    // wait + ack) so a single capture correlates all sites of a handshake.
+    private static readonly IReadOnlySet<ulong> _diagGuestRipWatchSet =
+        GuestRipWatch.ParseRipSet(Environment.GetEnvironmentVariable("SHARPEMU_DIAG_GUEST_RIP_WATCH"));
+
+    private static readonly bool _diagGuestRipWatchEnabled = _diagGuestRipWatchSet.Count != 0;
 
     private static readonly int _diagGuestRipWatchLimit = ParseGuestRipWatchLimit();
 
@@ -46,21 +50,22 @@ public sealed unsafe partial class DirectExecutionBackend
     // is absent while the env var was set, the running binary predates the watch.
     private void LogGuestRipWatchArmed()
     {
-        if (_diagGuestRipWatch == 0)
+        if (!_diagGuestRipWatchEnabled)
         {
             return;
         }
 
+        var rips = string.Join(",", System.Linq.Enumerable.Select(_diagGuestRipWatchSet, r => $"0x{r:X}"));
         var ops = string.Join(",", System.Linq.Enumerable.Select(_diagGuestRipWatchOperands,
             o => $"{o.Reg}{(o.Disp >= 0 ? "+" : "-")}0x{Math.Abs(o.Disp):X}:{o.Size}"));
         Console.Error.WriteLine(
-            $"[LOADER][DIAG] guest_rip_watch armed rip=0x{_diagGuestRipWatch:X} " +
+            $"[LOADER][DIAG] guest_rip_watch armed rip=[{rips}] " +
             $"limit={_diagGuestRipWatchLimit} operands=[{ops}]");
     }
 
     private void MaybeEmitGuestRipWatch(CpuContext ctx, ulong returnRip, string nid)
     {
-        if (_diagGuestRipWatch == 0 || returnRip != _diagGuestRipWatch)
+        if (!_diagGuestRipWatchEnabled || !_diagGuestRipWatchSet.Contains(returnRip))
         {
             return;
         }

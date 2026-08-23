@@ -24,6 +24,25 @@ public sealed class GuestRipWatchTests
     }
 
     [Fact]
+    public void ParseRipSet_MultipleSites()
+    {
+        // producer signal 0x86, producer wait 0x84, consumer wait 0x86, consumer ack 0x84
+        var set = GuestRipWatch.ParseRipSet("0x800D17D53,0x800D17CFB,0x800D18129,0x800D1379F");
+        Assert.Equal(4, set.Count);
+        Assert.Contains(0x800D17D53UL, set);
+        Assert.Contains(0x800D1379FUL, set);
+    }
+
+    [Theory]
+    [InlineData("", 0)]
+    [InlineData("0x800D18129", 1)]
+    [InlineData("0, garbage, 0x800D18129", 1)]   // zero and garbage dropped
+    public void ParseRipSet_DropsEmptyAndBad(string input, int expectedCount)
+    {
+        Assert.Equal(expectedCount, GuestRipWatch.ParseRipSet(input).Count);
+    }
+
+    [Fact]
     public void ParseOperands_TheCocoonConditionSpec()
     {
         // The r13 object fields the 0x86 acquire loop consults (from the disasm):

@@ -305,7 +305,7 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 		}
-		if (_diagGuestRipWatch != 0)
+		if (_diagGuestRipWatchEnabled)
 		{
 			MaybeEmitGuestRipWatch(cpuContext, num7, importStubEntry.Nid);
 		}

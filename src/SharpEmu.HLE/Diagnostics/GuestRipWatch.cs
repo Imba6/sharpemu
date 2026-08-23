@@ -88,6 +88,29 @@ public static class GuestRipWatch
         return TryParseIntLiteral(value.Trim(), out var v) ? v : 0UL;
     }
 
+    /// <summary>
+    /// Parse a comma-separated set of RIP literals (e.g. "0x800D18129,0x800D17D53").
+    /// Zero/garbage entries are dropped. Empty result = watch disabled.
+    /// </summary>
+    public static IReadOnlySet<ulong> ParseRipSet(string? value)
+    {
+        var set = new HashSet<ulong>();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return set;
+        }
+
+        foreach (var item in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (TryParseIntLiteral(item, out var v) && v != 0)
+            {
+                set.Add(v);
+            }
+        }
+
+        return set;
+    }
+
     private static bool TryParseIntLiteral(string s, out ulong value)
     {
         s = s.Trim();
